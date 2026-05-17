@@ -1,0 +1,6 @@
+{
+  "name": "V-Check: Mobile Video Recorder & Editor",
+  "description": "A mobile-first video recording and editing tool with real-time checkpoint marking and stylized state overlays.",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["video_recording", "video_editing"]
+}
