@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo, Fragment } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback, Fragment } from 'react';
 import { Play, Pause, Plus, Trash2, ChevronUp, ChevronDown, Download, Move, ExternalLink, Type, Palette, Maximize, Scissors, Pin, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { cn, formatTime } from '../lib/utils';
@@ -100,8 +100,6 @@ export default function EditorView({
   const [activeTab, setActiveTab] = useState<'points' | 'styling'>('points');
 
   const clampZoomLevel = (value: number) => Math.max(1, Math.min(20, value));
-  const updateZoomLevel = (value: number) => setZoomLevel(clampZoomLevel(value));
-  const adjustZoomLevel = (delta: number) => setZoomLevel(prev => clampZoomLevel(prev + delta));
   const stopZoomControlPropagation = (e: React.PointerEvent | React.TouchEvent) => {
     e.stopPropagation();
   };
@@ -112,6 +110,34 @@ export default function EditorView({
   const overlayRef = useRef<HTMLDivElement>(null);
   const seekBarRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  const centerTimelineOnCurrentTime = useCallback(() => {
+    requestAnimationFrame(() => {
+      const scrollContainer = scrollContainerRef.current;
+      if (!scrollContainer) return;
+
+      const currentRatio = Math.max(0, Math.min(1, currentTime / Math.max(1, videoData.duration)));
+      const contentWidth = scrollContainer.scrollWidth;
+      const visibleWidth = scrollContainer.clientWidth;
+      const maxScrollLeft = Math.max(0, contentWidth - visibleWidth);
+      const targetX = contentWidth * currentRatio;
+      const nextScrollLeft = Math.max(0, Math.min(maxScrollLeft, targetX - visibleWidth / 2));
+
+      scrollContainer.scrollLeft = nextScrollLeft;
+    });
+  }, [currentTime, videoData.duration]);
+
+  const applyZoomLevel = useCallback((nextZoom: number) => {
+    setZoomLevel(prev => {
+      const clampedZoom = clampZoomLevel(nextZoom);
+      return clampedZoom === prev ? prev : clampedZoom;
+    });
+    centerTimelineOnCurrentTime();
+  }, [centerTimelineOnCurrentTime]);
+
+  const adjustZoomLevel = useCallback((delta: number) => {
+    applyZoomLevel(zoomLevel + delta);
+  }, [applyZoomLevel, zoomLevel]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -240,16 +266,7 @@ export default function EditorView({
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const zoomDelta = e.deltaY * -0.01;
-        setZoomLevel(prev => {
-          const newZoom = clampZoomLevel(prev + prev * zoomDelta);
-          if (newZoom !== prev) {
-             const ratio = newZoom / prev;
-             const mouseX = e.clientX - container.getBoundingClientRect().left;
-             const scrollCenter = container.scrollLeft + mouseX;
-             container.scrollLeft = scrollCenter * ratio - mouseX;
-          }
-          return newZoom;
-        });
+        applyZoomLevel(zoomLevel + zoomLevel * zoomDelta);
       }
     };
 
@@ -257,7 +274,7 @@ export default function EditorView({
     return () => {
       container.removeEventListener('wheel', onWheel);
     };
-  }, []);
+  }, [applyZoomLevel, zoomLevel]);
 
 
   // Handle scrubbing
@@ -1076,7 +1093,7 @@ export default function EditorView({
                   max="20"
                   step="0.5"
                   value={zoomLevel}
-                  onChange={(e) => updateZoomLevel(Number(e.currentTarget.value))}
+                  onChange={(e) => applyZoomLevel(Number(e.currentTarget.value))}
                   onPointerDown={stopZoomControlPropagation}
                   onTouchStart={stopZoomControlPropagation}
                   className="w-16 min-w-0 accent-orange-500 sm:w-28 md:w-40"

@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   ShieldCheck,
   Images,
+  X,
 } from "lucide-react";
 import { formatTime, cn } from "../lib/utils";
 import { Checkpoint } from "../types";
@@ -37,6 +38,33 @@ type PermissionUiStatus =
   | "denied"
   | "error"
   | "web";
+
+const CAMERA_PERMISSION_STORAGE_KEY = "vcheck.cameraPermissionGranted";
+
+const hasStoredCameraPermissionGrant = () => {
+  try {
+    return localStorage.getItem(CAMERA_PERMISSION_STORAGE_KEY) === "true";
+  } catch (err) {
+    console.warn("[CameraView] Could not read camera permission flag", err);
+    return false;
+  }
+};
+
+const storeCameraPermissionGrant = () => {
+  try {
+    localStorage.setItem(CAMERA_PERMISSION_STORAGE_KEY, "true");
+  } catch (err) {
+    console.warn("[CameraView] Could not store camera permission flag", err);
+  }
+};
+
+const clearStoredCameraPermissionGrant = () => {
+  try {
+    localStorage.removeItem(CAMERA_PERMISSION_STORAGE_KEY);
+  } catch (err) {
+    console.warn("[CameraView] Could not clear camera permission flag", err);
+  }
+};
 
 type CameraErrorDetails = {
   name: string;
@@ -105,7 +133,12 @@ export default function CameraView({
   );
   const [status, setStatus] = useState<CameraStatus>("idle");
   const [cameraPermissionStatus, setCameraPermissionStatus] =
-    useState<PermissionUiStatus>("unknown");
+    useState<PermissionUiStatus>(
+      hasStoredCameraPermissionGrant() ? "granted" : "unknown",
+    );
+  const [showPermissionPanel, setShowPermissionPanel] = useState(
+    () => !hasStoredCameraPermissionGrant(),
+  );
   const [storagePermissionStatus, setStoragePermissionStatus] =
     useState<PermissionUiStatus>("unknown");
   const [permissionMessage, setPermissionMessage] = useState("");
@@ -118,7 +151,20 @@ export default function CameraView({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
+  const closePermissionPanelTimeoutRef = useRef<number | null>(null);
+  const cameraInitializedRef = useRef(false);
   const startTimeRef = useRef<number>(0);
+
+  const schedulePermissionPanelClose = useCallback(() => {
+    if (closePermissionPanelTimeoutRef.current) {
+      window.clearTimeout(closePermissionPanelTimeoutRef.current);
+    }
+
+    closePermissionPanelTimeoutRef.current = window.setTimeout(() => {
+      setShowPermissionPanel(false);
+      closePermissionPanelTimeoutRef.current = null;
+    }, 1000);
+  }, []);
 
   const stopActiveStream = useCallback(() => {
     activeStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -155,6 +201,19 @@ export default function CameraView({
     [],
   );
 
+  const markCameraAccessGranted = useCallback(() => {
+    storeCameraPermissionGrant();
+    setStatus("ready");
+    setCameraPermissionStatus("granted");
+    setPermissionMessage(t.permissionCameraGranted);
+    schedulePermissionPanelClose();
+  }, [schedulePermissionPanelClose, t.permissionCameraGranted]);
+
+  const handleCameraAccessFailure = useCallback(() => {
+    clearStoredCameraPermissionGrant();
+    setShowPermissionPanel(true);
+  }, []);
+
   const requestCameraAccess = useCallback(
     async (requestedFacingMode = facingMode) => {
       setStatus("initializing");
@@ -181,9 +240,7 @@ export default function CameraView({
 
         const stream = await navigator.mediaDevices.getUserMedia(constraints);
         attachCameraStream(stream);
-        setStatus("ready");
-        setCameraPermissionStatus("granted");
-        setPermissionMessage(t.permissionCameraGranted);
+        markCameraAccessGranted();
       } catch (err: unknown) {
         const details = getCameraErrorDetails(err);
         console.error("[CameraView] getUserMedia error", details, err);
@@ -195,9 +252,7 @@ export default function CameraView({
               audio: true,
             });
             attachCameraStream(simpleStream);
-            setStatus("ready");
-            setCameraPermissionStatus("granted");
-            setPermissionMessage(t.permissionCameraGranted);
+            markCameraAccessGranted();
             return;
           } catch (retryErr: unknown) {
             const retryDetails = updateCameraError(
@@ -205,6 +260,7 @@ export default function CameraView({
               isPermissionDeniedError(retryErr) ? t.camDenied : t.camNotFound,
             );
             const denied = isPermissionDeniedError(retryErr);
+            handleCameraAccessFailure();
             setStatus(denied ? "denied" : "error");
             setCameraPermissionStatus(denied ? "denied" : "error");
             setPermissionMessage(
@@ -224,6 +280,7 @@ export default function CameraView({
 
         if (isPermissionDeniedError(err)) {
           updateCameraError(err, t.camDenied);
+          handleCameraAccessFailure();
           setStatus("denied");
           setCameraPermissionStatus("denied");
           setPermissionMessage(t.permissionCameraDenied);
@@ -239,6 +296,7 @@ export default function CameraView({
             ? t.camUnsupportedWebView
             : details.message || t.camError,
         );
+        handleCameraAccessFailure();
         setStatus(unsupported ? "unsupported" : "error");
         setCameraPermissionStatus("error");
         setPermissionMessage(
@@ -246,7 +304,14 @@ export default function CameraView({
         );
       }
     },
-    [attachCameraStream, facingMode, t, updateCameraError],
+    [
+      attachCameraStream,
+      facingMode,
+      handleCameraAccessFailure,
+      markCameraAccessGranted,
+      t,
+      updateCameraError,
+    ],
   );
 
   const checkStoragePermission = useCallback(async () => {
@@ -296,17 +361,40 @@ export default function CameraView({
   useEffect(() => {
     checkStoragePermission();
 
+    if (cameraInitializedRef.current) return;
+    cameraInitializedRef.current = true;
+
+    if (hasStoredCameraPermissionGrant()) {
+      setShowPermissionPanel(false);
+      setCameraPermissionStatus("granted");
+      requestCameraAccess();
+      return;
+    }
+
+    setShowPermissionPanel(true);
     setCameraPermissionStatus(activeStreamRef.current ? "granted" : "unknown");
-  }, [checkStoragePermission]);
+  }, [checkStoragePermission, requestCameraAccess]);
 
   useEffect(() => {
     return () => {
       stopActiveStream();
       if (timerRef.current) window.clearInterval(timerRef.current);
+      if (closePermissionPanelTimeoutRef.current) {
+        window.clearTimeout(closePermissionPanelTimeoutRef.current);
+      }
     };
   }, [stopActiveStream]);
 
   const handleRetry = () => requestCameraAccess();
+
+  const handleShowPermissionPanel = () => {
+    if (closePermissionPanelTimeoutRef.current) {
+      window.clearTimeout(closePermissionPanelTimeoutRef.current);
+      closePermissionPanelTimeoutRef.current = null;
+    }
+
+    setShowPermissionPanel(true);
+  };
 
   const getSupportedMimeType = () => {
     const types = [
@@ -456,7 +544,17 @@ export default function CameraView({
       {/* Camera Preview Area */}
       <div className="flex-1 relative bg-black flex items-center justify-center">
         {!isRecording && (
-          <div className="absolute top-4 left-4 right-4 z-30 flex justify-center pointer-events-none">
+          <button
+            type="button"
+            onClick={handleShowPermissionPanel}
+            className="absolute right-4 top-4 z-20 rounded-full border border-white/10 bg-[#121214]/70 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white/60 shadow-xl backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white"
+          >
+            {t.permissionPanelTitle}
+          </button>
+        )}
+
+        {!isRecording && showPermissionPanel && (
+          <div className="absolute top-16 left-4 right-4 z-30 flex justify-center pointer-events-none">
             <div className="w-full max-w-2xl rounded-3xl border border-white/10 bg-[#121214]/80 p-3 shadow-2xl backdrop-blur-xl pointer-events-auto sm:p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
                 <div>
@@ -467,14 +565,24 @@ export default function CameraView({
                     {t.permissionPanelDesc}
                   </p>
                 </div>
-                <CheckCircle2
-                  className={cn(
-                    "h-5 w-5 shrink-0",
-                    cameraPermissionStatus === "granted"
-                      ? "text-emerald-400"
-                      : "text-white/15",
-                  )}
-                />
+                <div className="flex shrink-0 items-center gap-2">
+                  <CheckCircle2
+                    className={cn(
+                      "h-5 w-5",
+                      cameraPermissionStatus === "granted"
+                        ? "text-emerald-400"
+                        : "text-white/15",
+                    )}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPermissionPanel(false)}
+                    className="rounded-full border border-white/10 bg-white/5 p-1 text-white/50 transition-colors hover:bg-white/10 hover:text-white"
+                    aria-label="Close permission panel"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
               </div>
 
               <div className="grid gap-2 sm:grid-cols-2">
