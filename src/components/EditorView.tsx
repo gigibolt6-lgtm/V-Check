@@ -568,6 +568,43 @@ export default function EditorView({
 
   const sortedCheckpoints = [...videoData.checkpoints].sort((a, b) => a.time - b.time);
 
+
+  const downloadBlob = (blob: Blob, fileName: string) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', fileName);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const saveOriginalVideo = async () => {
+    try {
+      const response = await fetch(videoData.url);
+      const blob = await response.blob();
+      const extension = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('webm') ? 'webm' : 'mov';
+      const safeTitle = (overlayConfig.titleText || 'original_video').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      downloadBlob(blob, `${safeTitle}_original.${extension}`);
+    } catch (err) {
+      console.error('Failed to save original video', err);
+      alert('元動画の保存に失敗しました。');
+    }
+  };
+
+  const exportOverlayConfigJson = () => {
+    const payload = {
+      overlayConfig,
+      checkpoints: videoData.checkpoints,
+      duration: videoData.duration,
+      exportedAt: new Date().toISOString(),
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8;' });
+    const safeTitle = (overlayConfig.titleText || 'overlay_config').replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    downloadBlob(blob, `${safeTitle}_overlay.json`);
+  };
+
   const exportCSV = () => {
     let csvContent = "\uFEFF"; // BOM for UTF-8
     csvContent += `${t.csvHeader}\n`;
@@ -591,15 +628,8 @@ export default function EditorView({
     });
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
     const safeTitle = (overlayConfig.titleText || 'video_checkpoints').replace(/[^a-z0-9]/gi, '_').toLowerCase();
-    link.href = url;
-    link.setAttribute('download', `${safeTitle}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+    downloadBlob(blob, `${safeTitle}.csv`);
   };
 
   const saveProject = async () => {
@@ -1648,6 +1678,22 @@ export default function EditorView({
                   <span className="text-[9px] text-black/60 font-normal normal-case">{t.mp4ExportDesc}</span>
                 </button>
 
+
+                <button
+                  className="w-full py-4 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-xl font-black uppercase tracking-widest text-xs flex flex-col items-center justify-center gap-1 hover:bg-emerald-500/30 hover:border-emerald-500/50 transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
+                  onClick={() => {
+                    saveOriginalVideo();
+                    setShowExporter(false);
+                  }}
+                  disabled={isExporting}
+                >
+                  <div className="flex items-center gap-2">
+                    <Download className="w-4 h-4" />
+                    元動画を保存
+                  </div>
+                  <span className="text-[9px] text-emerald-400/50 font-normal normal-case">合成できない端末向けの代替出力</span>
+                </button>
+
                 <div className="w-full h-px bg-white/5 my-2" />
 
                 <button 
@@ -1676,6 +1722,22 @@ export default function EditorView({
                     {t.saveProject}
                   </div>
                   <span className="text-[9px] text-teal-400/50 font-normal normal-case">{t.saveProjectDesc}</span>
+                </button>
+
+
+                <button
+                  className="w-full py-4 bg-purple-500/20 text-purple-400 border border-purple-500/30 rounded-xl font-black uppercase tracking-widest text-xs flex flex-col items-center justify-center gap-1 hover:bg-purple-500/30 hover:border-purple-500/50 transition-all active:scale-95 disabled:opacity-50 disabled:pointer-events-none"
+                  onClick={() => {
+                    exportOverlayConfigJson();
+                    setShowExporter(false);
+                  }}
+                  disabled={isExporting}
+                >
+                  <div className="flex items-center gap-2">
+                    <Download className="w-4 h-4" />
+                    オーバーレイ設定JSONを保存
+                  </div>
+                  <span className="text-[9px] text-purple-400/50 font-normal normal-case">設定とチェックポイントをJSONとして保存</span>
                 </button>
 
                 <button 
