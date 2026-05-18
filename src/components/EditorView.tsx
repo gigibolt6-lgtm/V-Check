@@ -54,6 +54,13 @@ export default function EditorView({
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [activeTab, setActiveTab] = useState<'points' | 'styling'>('points');
+
+  const clampZoomLevel = (value: number) => Math.max(1, Math.min(20, value));
+  const updateZoomLevel = (value: number) => setZoomLevel(clampZoomLevel(value));
+  const adjustZoomLevel = (delta: number) => setZoomLevel(prev => clampZoomLevel(prev + delta));
+  const stopZoomControlPropagation = (e: React.PointerEvent | React.TouchEvent) => {
+    e.stopPropagation();
+  };
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const containerWrapperRef = useRef<HTMLDivElement>(null);
@@ -190,7 +197,7 @@ export default function EditorView({
         e.preventDefault();
         const zoomDelta = e.deltaY * -0.01;
         setZoomLevel(prev => {
-          const newZoom = Math.max(1, Math.min(20, prev + prev * zoomDelta));
+          const newZoom = clampZoomLevel(prev + prev * zoomDelta);
           if (newZoom !== prev) {
              const ratio = newZoom / prev;
              const mouseX = e.clientX - container.getBoundingClientRect().left;
@@ -202,62 +209,12 @@ export default function EditorView({
       }
     };
 
-    let initialDist: number | null = null;
-    let initialZoom = 1;
-    let initialScroll = 0;
-
-    const onTouchStart = (e: TouchEvent) => {
-      if (e.touches.length === 2) {
-        const t1 = e.touches[0];
-        const t2 = e.touches[1];
-        initialDist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-        setZoomLevel(z => {
-          initialZoom = z;
-          return z;
-        });
-        initialScroll = container.scrollLeft;
-      }
-    };
-
-    const onTouchMove = (e: TouchEvent) => {
-      if (e.touches.length === 2 && initialDist !== null) {
-        e.preventDefault();
-        const t1 = e.touches[0];
-        const t2 = e.touches[1];
-        const dist = Math.hypot(t1.clientX - t2.clientX, t1.clientY - t2.clientY);
-        const ratio = dist / initialDist;
-        const newZoom = Math.max(1, Math.min(20, initialZoom * ratio));
-        
-        setZoomLevel(newZoom);
-        
-        const centerClientX = (t1.clientX + t2.clientX) / 2;
-        const containerRect = container.getBoundingClientRect();
-        const mouseX = centerClientX - containerRect.left;
-        const scrollCenter = initialScroll + mouseX;
-        container.scrollLeft = scrollCenter * (newZoom / initialZoom) - mouseX;
-      }
-    };
-
-    const onTouchEnd = (e: TouchEvent) => {
-      if (e.touches.length < 2) {
-        initialDist = null;
-      }
-    };
-
     container.addEventListener('wheel', onWheel, { passive: false });
-    container.addEventListener('touchstart', onTouchStart, { passive: false });
-    container.addEventListener('touchmove', onTouchMove, { passive: false });
-    container.addEventListener('touchend', onTouchEnd);
-    container.addEventListener('touchcancel', onTouchEnd);
-    
     return () => {
       container.removeEventListener('wheel', onWheel);
-      container.removeEventListener('touchstart', onTouchStart);
-      container.removeEventListener('touchmove', onTouchMove);
-      container.removeEventListener('touchend', onTouchEnd);
-      container.removeEventListener('touchcancel', onTouchEnd);
     };
   }, []);
+
 
   // Handle scrubbing
   useEffect(() => {
@@ -1128,6 +1085,67 @@ export default function EditorView({
                 >
                   <Plus className="w-3 h-3" /> Insert Marker
                 </button>
+              </div>
+
+              <div
+                className="rounded-2xl border border-white/5 bg-black/20 p-4 space-y-3"
+                onPointerDown={stopZoomControlPropagation}
+                onTouchStart={stopZoomControlPropagation}
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30">シークバー縮尺</div>
+                    <div className="text-[9px] font-bold uppercase tracking-widest text-white/20 mt-1">Timeline Scale</div>
+                  </div>
+                  <div className="text-sm font-black font-mono text-orange-500 tabular-nums">{zoomLevel.toFixed(1)}x</div>
+                </div>
+
+                <input
+                  type="range"
+                  min="1"
+                  max="20"
+                  step="0.5"
+                  value={zoomLevel}
+                  onChange={(e) => updateZoomLevel(Number(e.currentTarget.value))}
+                  onPointerDown={stopZoomControlPropagation}
+                  onTouchStart={stopZoomControlPropagation}
+                  className="w-full accent-orange-500"
+                  aria-label="シークバー縮尺"
+                />
+
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => adjustZoomLevel(-0.5)}
+                    onPointerDown={stopZoomControlPropagation}
+                    onTouchStart={stopZoomControlPropagation}
+                    className="rounded-xl border border-white/5 bg-white/5 py-2 text-xs font-black text-white hover:bg-white/10 active:bg-white/20 disabled:opacity-30"
+                    disabled={zoomLevel <= 1}
+                    aria-label="シークバーを縮小"
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => updateZoomLevel(1)}
+                    onPointerDown={stopZoomControlPropagation}
+                    onTouchStart={stopZoomControlPropagation}
+                    className="rounded-xl border border-white/5 bg-white/5 py-2 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/10 active:bg-white/20"
+                  >
+                    リセット
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => adjustZoomLevel(0.5)}
+                    onPointerDown={stopZoomControlPropagation}
+                    onTouchStart={stopZoomControlPropagation}
+                    className="rounded-xl border border-white/5 bg-white/5 py-2 text-xs font-black text-white hover:bg-white/10 active:bg-white/20 disabled:opacity-30"
+                    disabled={zoomLevel >= 20}
+                    aria-label="シークバーを拡大"
+                  >
+                    ＋
+                  </button>
+                </div>
               </div>
 
               {[...videoData.checkpoints].sort((a, b) => a.time - b.time).map((cp, idx, arr) => (
