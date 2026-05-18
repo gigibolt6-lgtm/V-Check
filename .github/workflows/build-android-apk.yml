@@ -39,6 +39,9 @@ jobs:
       - name: Sync Capacitor assets
         run: npm run cap:sync
 
+      - name: Verify Android permissions
+        run: npm run android:permissions
+
       - name: Build debug APK
         run: cd android && ./gradlew assembleDebug
 

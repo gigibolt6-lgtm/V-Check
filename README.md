@@ -51,7 +51,7 @@ APK は `android/app/build/outputs/apk/debug/` に出力されます。
 
 APK ビルド時は `npm run cap:sync` の後半で `scripts/ensure-android-permissions.mjs` が実行され、生成済みの `android/app/src/main/AndroidManifest.xml` に録画と保存に必要な権限を追加します。
 
-追加される主な権限は `CAMERA`、`RECORD_AUDIO`、Android 13 以降向けの `READ_MEDIA_VIDEO` / `READ_MEDIA_IMAGES`、古い Android 向けの `READ_EXTERNAL_STORAGE` / `WRITE_EXTERNAL_STORAGE` です。
+追加される主な権限は `CAMERA`、`RECORD_AUDIO`、WebView/録音まわりの互換性用の `MODIFY_AUDIO_SETTINGS`、Android 13 以降向けの `READ_MEDIA_VIDEO` / `READ_MEDIA_IMAGES`、古い Android 向けの `READ_EXTERNAL_STORAGE` / `WRITE_EXTERNAL_STORAGE` です。GitHub Actions では `npm run cap:sync` 後に `npm run android:permissions` を再実行して、生成された Android プロジェクトに権限が残っていることを検証します。
 
 ### 動画保存方式
 

@@ -18,6 +18,37 @@ import EditorView from './components/EditorView';
 import SettingsView from './components/SettingsView';
 import { useTranslation, translations, isDefaultStateName } from './i18n';
 
+
+const getVideoMetadataDurationMs = (url: string) => new Promise<number>((resolve, reject) => {
+  const video = document.createElement('video');
+
+  const cleanup = () => {
+    video.onloadedmetadata = null;
+    video.onerror = null;
+    video.removeAttribute('src');
+    video.load();
+  };
+
+  video.preload = 'metadata';
+  video.onloadedmetadata = () => {
+    const durationMs = video.duration * 1000;
+    cleanup();
+
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      reject(new Error('Invalid video duration metadata'));
+      return;
+    }
+
+    resolve(durationMs);
+  };
+  video.onerror = () => {
+    cleanup();
+    reject(new Error('Failed to load video metadata'));
+  };
+  video.src = url;
+  video.load();
+});
+
 export default function App() {
   const { t } = useTranslation();
   const [mode, setMode] = useState<AppMode>('record');
@@ -119,11 +150,18 @@ export default function App() {
     if (!file) return;
 
     const url = URL.createObjectURL(file);
-    const video = document.createElement('video');
-    video.src = url;
-    video.onloadedmetadata = () => {
-      handleVideoRecorded(url, video.duration, []);
-    };
+
+    getVideoMetadataDurationMs(url)
+      .then((durationMs) => {
+        handleVideoRecorded(url, durationMs, []);
+      })
+      .catch((err) => {
+        console.error('Failed to import video metadata', err);
+        URL.revokeObjectURL(url);
+        alert(t.importVideoMetadataError);
+      });
+
+    e.target.value = '';
   };
 
   const updateCheckpoints = useCallback((newCheckpoints: Checkpoint[]) => {

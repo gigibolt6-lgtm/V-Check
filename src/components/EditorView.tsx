@@ -8,6 +8,50 @@ import { useVideoExport } from '../hooks/useVideoExport';
 import { useTranslation, translations, isDefaultStateName } from '../i18n';
 import JSZip from 'jszip';
 
+
+const getVideoMetadataDurationMs = (url: string) => new Promise<number | null>((resolve) => {
+  const video = document.createElement('video');
+
+  const cleanup = () => {
+    video.onloadedmetadata = null;
+    video.onerror = null;
+    video.removeAttribute('src');
+    video.load();
+  };
+
+  video.preload = 'metadata';
+  video.onloadedmetadata = () => {
+    const durationMs = video.duration * 1000;
+    cleanup();
+    resolve(Number.isFinite(durationMs) && durationMs > 0 ? durationMs : null);
+  };
+  video.onerror = () => {
+    cleanup();
+    resolve(null);
+  };
+  video.src = url;
+  video.load();
+});
+
+const normalizeLoadedProjectVideoData = (loadedVideoData: VideoData, actualVideoDurationMs: number | null): VideoData => {
+  const savedDuration = loadedVideoData.duration;
+
+  if (
+    actualVideoDurationMs &&
+    Number.isFinite(savedDuration) &&
+    savedDuration > 0 &&
+    savedDuration < 1000 &&
+    Math.abs(savedDuration * 1000 - actualVideoDurationMs) < Math.abs(savedDuration - actualVideoDurationMs)
+  ) {
+    return {
+      ...loadedVideoData,
+      duration: savedDuration * 1000,
+    };
+  }
+
+  return loadedVideoData;
+};
+
 interface EditorViewProps {
   videoData: VideoData;
   overlayConfig: OverlayConfig;
@@ -616,8 +660,9 @@ export default function EditorView({
         }
         
         if (onLoadProject) {
+          const actualVideoDurationMs = newVideoData?.url ? await getVideoMetadataDurationMs(newVideoData.url) : null;
           onLoadProject({
-            videoData: newVideoData,
+            videoData: newVideoData ? normalizeLoadedProjectVideoData(newVideoData, actualVideoDurationMs) : undefined,
             overlayConfig: newOverlayConfig,
           });
           setShowExporter(false);

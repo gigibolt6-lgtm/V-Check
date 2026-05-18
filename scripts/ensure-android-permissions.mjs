@@ -14,6 +14,7 @@ const permissions = [
   '<uses-permission android:name="android.permission.INTERNET" />',
   '<uses-permission android:name="android.permission.CAMERA" />',
   '<uses-permission android:name="android.permission.RECORD_AUDIO" />',
+  '<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />',
   '<uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />',
   '<uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />',
   '<uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />',
@@ -28,16 +29,25 @@ const missingPermissions = permissions.filter((permission) => {
 
 if (missingPermissions.length === 0) {
   console.log('[ensure-android-permissions] Android permissions are already present.');
-  process.exit(0);
-}
-
-const insertBlock = `${missingPermissions.map((permission) => `    ${permission}`).join('\n')}\n`;
-
-if (manifest.includes('<application')) {
-  manifest = manifest.replace(/(\s*<application)/, `\n${insertBlock}$1`);
 } else {
-  manifest = manifest.replace(/(<manifest[^>]*>)/, `$1\n${insertBlock}`);
+  const insertBlock = `${missingPermissions.map((permission) => `    ${permission}`).join('\n')}\n`;
+
+  if (manifest.includes('<application')) {
+    manifest = manifest.replace(/(\s*<application)/, `\n${insertBlock}$1`);
+  } else {
+    manifest = manifest.replace(/(<manifest[^>]*>)/, `$1\n${insertBlock}`);
+  }
+
+  writeFileSync(manifestPath, manifest);
+  console.log(`[ensure-android-permissions] Added ${missingPermissions.length} permission(s) to ${manifestPath}.`);
 }
 
-writeFileSync(manifestPath, manifest);
-console.log(`[ensure-android-permissions] Added ${missingPermissions.length} permission(s) to ${manifestPath}.`);
+const requiredPermissionNames = permissions.map(permissionName).filter(Boolean);
+const missingAfterWrite = requiredPermissionNames.filter((name) => !readFileSync(manifestPath, 'utf8').includes(`android:name="${name}"`));
+
+if (missingAfterWrite.length > 0) {
+  console.error(`[ensure-android-permissions] Missing required Android permission(s): ${missingAfterWrite.join(', ')}`);
+  process.exit(1);
+}
+
+console.log(`[ensure-android-permissions] Verified Android permissions: ${requiredPermissionNames.join(', ')}.`);
