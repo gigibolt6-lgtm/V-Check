@@ -26,15 +26,45 @@ const WEBM_MIME_CANDIDATES = [
   { mimeType: 'video/webm;codecs=h264', extension: 'webm' },
 ] as const;
 
+const ANDROID_RECORDER_MIME_CANDIDATES = [
+  { mimeType: 'video/webm', extension: 'webm' },
+  { mimeType: 'video/webm;codecs=vp8', extension: 'webm' },
+  { mimeType: 'video/webm;codecs=vp8,opus', extension: 'webm' },
+  { mimeType: 'video/webm;codecs=vp9', extension: 'webm' },
+  { mimeType: '', extension: 'webm' },
+] as const;
+
 const getVideoMimeCandidates = () => (
   Capacitor.getPlatform() === 'android'
-    ? [...WEBM_MIME_CANDIDATES, ...MP4_MIME_CANDIDATES]
+    ? ANDROID_RECORDER_MIME_CANDIDATES
     : [...MP4_MIME_CANDIDATES, ...WEBM_MIME_CANDIDATES]
 );
 
 type ExportMimeInfo = {
   mimeType: string;
   extension: 'mp4' | 'webm';
+};
+
+type TestedMimeTypeResult = {
+  requestedMimeType: string;
+  actualMimeType: string;
+  isTypeSupported: boolean | 'unknown';
+  success: boolean;
+  chunkCount: number;
+  dataAvailableCallCount: number;
+  blobSize: number;
+  firstDataAvailableTimeMs?: number;
+  error?: string;
+};
+
+type CanvasRecorderSupportResult = {
+  isCanvasRecorderSupportedOnThisDevice: boolean;
+  selectedMimeInfo?: ExportMimeInfo;
+  selectedMimeType: string;
+  testedMimeTypes: string[];
+  testedMimeTypeResults: TestedMimeTypeResult[];
+  testRecorderChunkCount: number;
+  testRecorderBlobSize: number;
 };
 
 type SaveAttempt = {
@@ -132,6 +162,202 @@ const createMediaRecorder = (stream: MediaStream) => {
   throw lastError || new Error('この端末で利用できる動画 MIME type が見つかりませんでした。');
 };
 
+
+
+const createMediaRecorderWithMimeInfo = (stream: MediaStream, mimeInfo: ExportMimeInfo) => {
+  if (typeof MediaRecorder === 'undefined') {
+    throw new Error('この環境では MediaRecorder が利用できないため、動画を書き出せません。');
+  }
+
+  return mimeInfo.mimeType
+    ? new MediaRecorder(stream, { mimeType: mimeInfo.mimeType })
+    : new MediaRecorder(stream);
+};
+
+const requestRecorderData = (recorder: MediaRecorder, reason: string, details?: Record<string, unknown>) => {
+  if (recorder.state !== 'recording') return;
+
+  try {
+    recorder.requestData();
+    logExportInfo('MediaRecorder.requestData called', {
+      reason,
+      mediaRecorderState: recorder.state,
+      recorderMimeType: recorder.mimeType,
+      ...details,
+    });
+  } catch (error) {
+    logExportError('MediaRecorder.requestData failed', error, {
+      reason,
+      mediaRecorderState: recorder.state,
+      recorderMimeType: recorder.mimeType,
+      ...details,
+    });
+  }
+};
+
+const runCanvasRecorderSmokeTest = async (): Promise<CanvasRecorderSupportResult> => {
+  const candidates = getVideoMimeCandidates();
+  const testedMimeTypes = candidates.map(candidate => candidate.mimeType || '(browser default)');
+  const testedMimeTypeResults: TestedMimeTypeResult[] = [];
+
+  if (typeof MediaRecorder === 'undefined') {
+    return {
+      isCanvasRecorderSupportedOnThisDevice: false,
+      selectedMimeType: '',
+      testedMimeTypes,
+      testedMimeTypeResults: candidates.map(candidate => ({
+        requestedMimeType: candidate.mimeType || '(browser default)',
+        actualMimeType: '',
+        isTypeSupported: 'unknown',
+        success: false,
+        chunkCount: 0,
+        dataAvailableCallCount: 0,
+        blobSize: 0,
+        error: 'MediaRecorder is undefined',
+      })),
+      testRecorderChunkCount: 0,
+      testRecorderBlobSize: 0,
+    };
+  }
+
+  for (const candidate of candidates) {
+    const isTypeSupported = candidate.mimeType && typeof MediaRecorder.isTypeSupported === 'function'
+      ? MediaRecorder.isTypeSupported(candidate.mimeType)
+      : 'unknown';
+    const canvas = document.createElement('canvas');
+    canvas.width = 320;
+    canvas.height = 180;
+    const ctx = canvas.getContext('2d');
+
+    if (!ctx || typeof canvas.captureStream !== 'function') {
+      testedMimeTypeResults.push({
+        requestedMimeType: candidate.mimeType || '(browser default)',
+        actualMimeType: '',
+        isTypeSupported,
+        success: false,
+        chunkCount: 0,
+        dataAvailableCallCount: 0,
+        blobSize: 0,
+        error: !ctx ? '2D canvas context unavailable' : 'canvas.captureStream unavailable',
+      });
+      continue;
+    }
+
+    let animationFrameId = 0;
+    const drawTestFrame = (frame = 0) => {
+      ctx.fillStyle = frame % 2 === 0 ? '#ff0000' : '#00ff00';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 28px sans-serif';
+      ctx.fillText(`V-Check ${frame}`, 24, 96);
+      animationFrameId = requestAnimationFrame(() => drawTestFrame(frame + 1));
+    };
+
+    let stream: MediaStream | undefined;
+    try {
+      drawTestFrame();
+      stream = canvas.captureStream(10);
+      const recorder = candidate.mimeType
+        ? new MediaRecorder(stream, { mimeType: candidate.mimeType })
+        : new MediaRecorder(stream);
+      const chunks: Blob[] = [];
+      let dataAvailableCallCount = 0;
+      let firstDataAvailableTimeMs: number | undefined;
+      const testStartTime = performance.now();
+
+      const result = await new Promise<TestedMimeTypeResult>((resolve) => {
+        let settled = false;
+        const finish = (success: boolean, error?: string) => {
+          if (settled) return;
+          settled = true;
+          if (animationFrameId) cancelAnimationFrame(animationFrameId);
+          stream?.getTracks().forEach(track => track.stop());
+          const blob = new Blob(chunks, { type: recorder.mimeType || candidate.mimeType || 'video/webm' });
+          resolve({
+            requestedMimeType: candidate.mimeType || '(browser default)',
+            actualMimeType: recorder.mimeType || candidate.mimeType || 'video/webm',
+            isTypeSupported,
+            success,
+            chunkCount: chunks.length,
+            dataAvailableCallCount,
+            blobSize: blob.size,
+            firstDataAvailableTimeMs,
+            error,
+          });
+        };
+
+        recorder.ondataavailable = (event) => {
+          dataAvailableCallCount += 1;
+          firstDataAvailableTimeMs ??= performance.now() - testStartTime;
+          if (event.data && event.data.size > 0) {
+            chunks.push(event.data);
+          }
+        };
+        recorder.onerror = (event) => finish(false, getErrorMessage(event));
+        recorder.onstop = () => finish(chunks.length > 0, chunks.length > 0 ? undefined : 'MediaRecorder produced no chunks');
+
+        try {
+          recorder.start(250);
+          requestRecorderData(recorder, 'android smoke test start');
+          window.setTimeout(() => requestRecorderData(recorder, 'android smoke test 1s'), 1000);
+          window.setTimeout(() => {
+            requestRecorderData(recorder, 'android smoke test before stop');
+            if (recorder.state !== 'inactive') recorder.stop();
+          }, 1200);
+          window.setTimeout(() => finish(false, 'MediaRecorder smoke test timed out'), 4000);
+        } catch (error) {
+          finish(false, getErrorMessage(error));
+        }
+      });
+
+      testedMimeTypeResults.push(result);
+      logExportInfo('Android canvas MediaRecorder smoke test result', result);
+
+      if (result.success) {
+        return {
+          isCanvasRecorderSupportedOnThisDevice: true,
+          selectedMimeInfo: {
+            mimeType: result.requestedMimeType === '(browser default)' ? '' : result.actualMimeType,
+            extension: getExtensionForMimeType(result.actualMimeType),
+          },
+          selectedMimeType: result.requestedMimeType === '(browser default)' ? '(browser default)' : result.actualMimeType,
+          testedMimeTypes,
+          testedMimeTypeResults,
+          testRecorderChunkCount: result.chunkCount,
+          testRecorderBlobSize: result.blobSize,
+        };
+      }
+    } catch (error) {
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+      stream?.getTracks().forEach(track => track.stop());
+      const result = {
+        requestedMimeType: candidate.mimeType || '(browser default)',
+        actualMimeType: candidate.mimeType,
+        isTypeSupported,
+        success: false,
+        chunkCount: 0,
+        dataAvailableCallCount: 0,
+        blobSize: 0,
+        error: getErrorMessage(error),
+      } satisfies TestedMimeTypeResult;
+      testedMimeTypeResults.push(result);
+      logExportInfo('Android canvas MediaRecorder smoke test result', result);
+    }
+  }
+
+  return {
+    isCanvasRecorderSupportedOnThisDevice: false,
+    selectedMimeType: '',
+    testedMimeTypes,
+    testedMimeTypeResults,
+    testRecorderChunkCount: 0,
+    testRecorderBlobSize: 0,
+  };
+};
+
+const getCanvasRecorderUnsupportedMessage = () => (
+  'この端末のAndroid WebViewでは動画合成出力に対応していない可能性があります。黒い0秒動画は保存しません。CSV出力、元動画保存、プロジェクトZIP保存、オーバーレイ設定JSON保存を利用してください。'
+);
 
 const waitForAnimationFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
@@ -266,7 +492,7 @@ const formatExportDiagnostics = (details: Record<string, unknown>) => Object.ent
   .map(([key, value]) => `${key}=${String(value)}`)
   .join(', ');
 
-const MIN_VALID_EXPORT_BLOB_BYTES = 100 * 1024;
+const MIN_VALID_EXPORT_BLOB_BYTES = 1024;
 const MIN_VALID_RECORDED_DURATION_MS = 1000;
 const NON_BLACK_SAMPLE_INTERVAL_FRAMES = 5;
 const NON_BLACK_RGB_THRESHOLD = 24;
@@ -284,23 +510,30 @@ const getWebMPlaybackNotice = (mimeInfo: ExportMimeInfo) => (
     : ''
 );
 
-const isSampleNonBlack = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
-  const clamp = (value: number, max: number) => Math.max(0, Math.min(max - 1, Math.round(value)));
-  const points = [
-    [0.5, 0.5],
-    [0.25, 0.25],
-    [0.75, 0.25],
-    [0.25, 0.75],
-    [0.75, 0.75],
-  ];
+const CANVAS_SAMPLE_POINTS = [
+  ...[0.1, 0.25, 0.5, 0.75, 0.9].flatMap(x => [0.1, 0.25, 0.5, 0.75, 0.9].map(y => [x, y])),
+];
 
-  return points.some(([xRatio, yRatio]) => {
+const getCanvasSamplePixels = (ctx: CanvasRenderingContext2D, width: number, height: number) => {
+  const clamp = (value: number, max: number) => Math.max(0, Math.min(max - 1, Math.round(value)));
+
+  return CANVAS_SAMPLE_POINTS.map(([xRatio, yRatio]) => {
     const { data } = ctx.getImageData(clamp(width * xRatio, width), clamp(height * yRatio, height), 1, 1);
-    return data[0] > NON_BLACK_RGB_THRESHOLD
-      || data[1] > NON_BLACK_RGB_THRESHOLD
-      || data[2] > NON_BLACK_RGB_THRESHOLD;
+    return data;
   });
 };
+
+const isSampleNonBlack = (ctx: CanvasRenderingContext2D, width: number, height: number) => (
+  getCanvasSamplePixels(ctx, width, height).some(data => (
+    data[0] > NON_BLACK_RGB_THRESHOLD
+    || data[1] > NON_BLACK_RGB_THRESHOLD
+    || data[2] > NON_BLACK_RGB_THRESHOLD
+  ))
+);
+
+const isSampleVisible = (ctx: CanvasRenderingContext2D, width: number, height: number) => (
+  getCanvasSamplePixels(ctx, width, height).some(data => data[3] > 0)
+);
 
 type BlobPlaybackProbeResult = {
   metadataLoaded: boolean;
@@ -690,6 +923,27 @@ export function useVideoExport(
       return;
     }
 
+    let recorderSupport: CanvasRecorderSupportResult | undefined;
+    if (Capacitor.getPlatform() === 'android') {
+      recorderSupport = await runCanvasRecorderSmokeTest();
+      logExportInfo('Android canvas recorder preflight completed', {
+        exportMode,
+        selectedMimeType: recorderSupport.selectedMimeType || '(none)',
+        testedMimeTypes: recorderSupport.testedMimeTypes,
+        testedMimeTypeResults: recorderSupport.testedMimeTypeResults,
+        testRecorderChunkCount: recorderSupport.testRecorderChunkCount,
+        testRecorderBlobSize: recorderSupport.testRecorderBlobSize,
+        isCanvasRecorderSupportedOnThisDevice: recorderSupport.isCanvasRecorderSupportedOnThisDevice,
+      });
+
+      if (!recorderSupport.isCanvasRecorderSupportedOnThisDevice || !recorderSupport.selectedMimeInfo) {
+        setIsExporting(false);
+        cleanupCanvas();
+        alert(getCanvasRecorderUnsupportedMessage());
+        return;
+      }
+    }
+
     const canvasStream = canvas.captureStream(30);
     logExportInfo('Canvas capture stream created', {
       width,
@@ -717,17 +971,35 @@ export function useVideoExport(
       logExportError('Could not capture audio tracks from source video; continuing without audio', error);
     }
 
-    audioTracks.forEach(track => canvasStream.addTrack(track));
-    logExportInfo('Audio tracks attached to export stream', { audioTrackCount: audioTracks.length });
+    const shouldAttachAudioTracks = !(Capacitor.getPlatform() === 'android' && recorderSupport?.selectedMimeInfo?.mimeType && !recorderSupport.selectedMimeInfo.mimeType.includes('opus'));
+    if (shouldAttachAudioTracks) {
+      audioTracks.forEach(track => canvasStream.addTrack(track));
+    }
+    logExportInfo('Audio tracks attached to export stream', {
+      audioTrackCount: shouldAttachAudioTracks ? audioTracks.length : 0,
+      skippedAudioTrackCount: shouldAttachAudioTracks ? 0 : audioTracks.length,
+      selectedMimeType: recorderSupport?.selectedMimeType,
+      reason: shouldAttachAudioTracks ? 'attached' : 'android selected video-only mimeType',
+    });
 
     let mediaRecorder: MediaRecorder;
     let mimeInfo: ExportMimeInfo;
     try {
-      const recorderConfig = createMediaRecorder(canvasStream);
-      mediaRecorder = recorderConfig.recorder;
-      mimeInfo = recorderConfig.mimeInfo;
+      if (recorderSupport?.selectedMimeInfo) {
+        mediaRecorder = createMediaRecorderWithMimeInfo(canvasStream, recorderSupport.selectedMimeInfo);
+        const actualMimeType = mediaRecorder.mimeType || recorderSupport.selectedMimeInfo.mimeType || 'video/webm';
+        mimeInfo = {
+          mimeType: actualMimeType,
+          extension: getExtensionForMimeType(actualMimeType),
+        };
+      } else {
+        const recorderConfig = createMediaRecorder(canvasStream);
+        mediaRecorder = recorderConfig.recorder;
+        mimeInfo = recorderConfig.mimeInfo;
+      }
     } catch (error) {
       logExportError('Failed to create MediaRecorder', error, {
+        selectedMimeType: recorderSupport?.selectedMimeType,
         supportedMimeTypes: getSupportedMimeTypes().map(({ mimeType }) => mimeType),
       });
       setIsExporting(false);
@@ -743,6 +1015,10 @@ export function useVideoExport(
     let renderedFrameCount = 0;
     let sampledFrameCount = 0;
     let sampledNonBlackFrameCount = 0;
+    let sampledVisibleFrameCount = 0;
+    let drawImageErrorCount = 0;
+    let onDataAvailableCalledCount = 0;
+    let firstDataAvailableTimeMs: number | undefined;
     let mediaRecorderErrorMessage = '';
 
     const stopExportRecording = (reason: string) => {
@@ -756,42 +1032,46 @@ export function useVideoExport(
         renderedFrameCount,
         sampledFrameCount,
         sampledNonBlackFrameCount,
+        sampledVisibleFrameCount,
+        drawImageErrorCount,
+        onDataAvailableCalledCount,
+        firstDataAvailableTimeMs,
         chunksLength: chunks.length,
         chunkSizes: chunks.map(chunk => chunk.size),
         canvasVideoTrackStates: getTrackReadyStates(canvasStream),
       });
 
-      if (mediaRecorder.state === 'recording') {
-        try {
-          mediaRecorder.requestData();
-          logExportInfo('MediaRecorder.requestData called before stop', {
-            mediaRecorderState: mediaRecorder.state,
-            recorderMimeType: mediaRecorder.mimeType,
-          });
-        } catch (error) {
-          logExportError('MediaRecorder.requestData before stop failed', error, {
-            mediaRecorderState: mediaRecorder.state,
-            recorderMimeType: mediaRecorder.mimeType,
-          });
-        }
-      }
+      requestRecorderData(mediaRecorder, 'real export before stop', {
+        exportMode,
+        renderedFrameCount,
+        sampledNonBlackFrameCount,
+        sampledVisibleFrameCount,
+        realRecorderChunkCount: chunks.length,
+      });
 
       mediaRecorder.stop();
     };
 
     mediaRecorder.ondataavailable = (e) => {
+      onDataAvailableCalledCount += 1;
+      firstDataAvailableTimeMs ??= recordingStartTime ? performance.now() - recordingStartTime : 0;
       if (e.data && e.data.size > 0) {
         chunks.push(e.data);
-        logExportInfo('MediaRecorder data chunk received', {
-          chunkSize: e.data.size,
-          chunkType: e.data.type,
-          chunkCount: chunks.length,
-          chunkSizes: chunks.map(chunk => chunk.size),
-          mediaRecorderState: mediaRecorder.state,
-          renderedFrameCount,
-          sampledNonBlackFrameCount,
-        });
       }
+      logExportInfo('MediaRecorder dataavailable event received', {
+        chunkSize: e.data?.size || 0,
+        chunkType: e.data?.type || '',
+        chunkCount: chunks.length,
+        chunkSizes: chunks.map(chunk => chunk.size),
+        ondataavailableCalledCount: onDataAvailableCalledCount,
+        firstDataAvailableTimeMs,
+        mediaRecorderState: mediaRecorder.state,
+        renderedFrameCount,
+        sampledNonBlackFrameCount,
+        sampledVisibleFrameCount,
+        realRecorderChunkCount: chunks.length,
+        realRecorderBlobSize: chunks.reduce((sum, chunk) => sum + chunk.size, 0),
+      });
     };
 
     mediaRecorder.onstop = async () => {
@@ -808,11 +1088,19 @@ export function useVideoExport(
           ? recordingStopTime - recordingStartTime
           : 0;
         const blobDurationMs = blob.size > 0 ? await getBlobVideoDurationMs(blob) : null;
+        const realRecorderBlobSize = chunks.reduce((sum, chunk) => sum + chunk.size, 0);
         const diagnostics = {
+          exportMode,
           platform: Capacitor.getPlatform(),
           isNativePlatform: Capacitor.isNativePlatform(),
           recorderMimeType,
+          selectedMimeType: mimeInfo.mimeType || '(browser default)',
           finalMimeType: finalMimeInfo.mimeType,
+          testedMimeTypes: recorderSupport?.testedMimeTypes || getSupportedMimeTypes().map(({ mimeType }) => mimeType),
+          testedMimeTypeResults: recorderSupport?.testedMimeTypeResults || [],
+          testRecorderChunkCount: recorderSupport?.testRecorderChunkCount ?? 'not_run',
+          testRecorderBlobSize: recorderSupport?.testRecorderBlobSize ?? 'not_run',
+          isCanvasRecorderSupportedOnThisDevice: recorderSupport?.isCanvasRecorderSupportedOnThisDevice ?? 'not_tested',
           extension: finalMimeInfo.extension,
           mediaRecorderState: mediaRecorder.state,
           canvasWidth: canvas.width,
@@ -821,11 +1109,18 @@ export function useVideoExport(
           videoHeight: video.videoHeight,
           videoReadyState: video.readyState,
           canvasVideoTrackStates: getTrackReadyStates(canvasStream),
+          canvasStreamTrackReadyState: getTrackReadyStates(canvasStream).join('|') || 'none',
           renderedFrameCount,
           sampledFrameCount,
           sampledNonBlackFrameCount,
+          sampledVisibleFrameCount,
+          drawImageErrorCount,
+          ondataavailableCalledCount: onDataAvailableCalledCount,
+          firstDataAvailableTimeMs: firstDataAvailableTimeMs ?? 'none',
           chunkCount: chunks.length,
           chunkSizes: chunks.map(chunk => chunk.size),
+          realRecorderChunkCount: chunks.length,
+          realRecorderBlobSize,
           blobType: blob.type,
           blobSize: blob.size,
           recordingStartTime,
@@ -852,7 +1147,10 @@ export function useVideoExport(
           blob.size < MIN_VALID_EXPORT_BLOB_BYTES ? `blob.size < ${MIN_VALID_EXPORT_BLOB_BYTES}` : '',
           recordedDurationMs < MIN_VALID_RECORDED_DURATION_MS ? `recordedDurationMs < ${MIN_VALID_RECORDED_DURATION_MS}` : '',
           renderedFrameCount === 0 ? 'renderedFrameCount === 0' : '',
-          sampledNonBlackFrameCount === 0 ? 'sampledNonBlackFrameCount === 0' : '',
+          exportMode === 'composite' && sampledNonBlackFrameCount === 0 ? 'composite sampledNonBlackFrameCount === 0' : '',
+          exportMode === 'overlayOnly' && sampledVisibleFrameCount === 0 ? 'overlayOnly sampledVisibleFrameCount === 0' : '',
+          drawImageErrorCount > 0 ? `drawImageErrorCount > 0 (${drawImageErrorCount})` : '',
+          onDataAvailableCalledCount === 0 ? 'ondataavailable called count === 0' : '',
           canvas.width <= 0 || canvas.height <= 0 ? 'canvas size is 0' : '',
           video.videoWidth <= 0 || video.videoHeight <= 0 ? 'video size is 0' : '',
           !hasLiveCanvasVideoTrack ? 'canvasVideoTrackStates does not include live' : '',
@@ -901,12 +1199,24 @@ export function useVideoExport(
           renderedFrameCount,
           sampledFrameCount,
           sampledNonBlackFrameCount,
+          sampledVisibleFrameCount,
+          drawImageErrorCount,
+          ondataavailableCalledCount: onDataAvailableCalledCount,
+          firstDataAvailableTimeMs: firstDataAvailableTimeMs ?? 'none',
+          realRecorderChunkCount: chunks.length,
+          realRecorderBlobSize: chunks.reduce((sum, chunk) => sum + chunk.size, 0),
+          selectedMimeType: mimeInfo.mimeType || '(browser default)',
+          testedMimeTypes: recorderSupport?.testedMimeTypes || getSupportedMimeTypes().map(({ mimeType }) => mimeType),
+          testRecorderChunkCount: recorderSupport?.testRecorderChunkCount ?? 'not_run',
+          testRecorderBlobSize: recorderSupport?.testRecorderBlobSize ?? 'not_run',
+          isCanvasRecorderSupportedOnThisDevice: recorderSupport?.isCanvasRecorderSupportedOnThisDevice ?? 'not_tested',
           recordingStartTime,
           recordingStopTime,
           recordedDurationMs: recordingStartTime && recordingStopTime ? recordingStopTime - recordingStartTime : 0,
         });
-        alert(`この端末では動画合成出力に失敗しました。0秒または壊れた動画は保存しません。
-原因: ${getErrorMessage(error)}`);
+        alert(`この端末では動画合成出力に対応していない可能性があります。0秒または壊れた動画は保存しません。
+原因: ${getErrorMessage(error)}
+代替手段: CSV出力、元動画保存、プロジェクトZIP保存、オーバーレイ設定JSON保存を利用してください。`);
       } finally {
         setIsExporting(false);
       }
@@ -919,6 +1229,9 @@ export function useVideoExport(
         mimeType: mediaRecorder.mimeType,
         state: mediaRecorder.state,
         sampledNonBlackFrameCount,
+        sampledVisibleFrameCount,
+        drawImageErrorCount,
+        ondataavailableCalledCount: onDataAvailableCalledCount,
       });
       stopExportRecording('MediaRecorder error');
     };
@@ -995,6 +1308,7 @@ export function useVideoExport(
         try {
           ctx.drawImage(video, 0, 0, width, height);
         } catch (error) {
+          drawImageErrorCount += 1;
           isStopped = true;
           exportAbortMessage = `動画フレームをcanvasへ描画できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`;
           logExportError('ctx.drawImage(video) failed during export', error, {
@@ -1013,35 +1327,25 @@ export function useVideoExport(
         }
       }
       renderedFrameCount += 1;
-      if (renderedFrameCount === 1 || renderedFrameCount % NON_BLACK_SAMPLE_INTERVAL_FRAMES === 0) {
+      const shouldSampleFrame = renderedFrameCount === 1 || renderedFrameCount % NON_BLACK_SAMPLE_INTERVAL_FRAMES === 0;
+      if (shouldSampleFrame) {
         sampledFrameCount += 1;
-        try {
-          if (isSampleNonBlack(ctx, width, height)) {
-            sampledNonBlackFrameCount += 1;
+        if (exportMode === 'composite') {
+          try {
+            if (isSampleNonBlack(ctx, width, height)) {
+              sampledNonBlackFrameCount += 1;
+            }
+          } catch (error) {
+            logExportError('Composite drawImage pixel sampling failed', error, {
+              exportMode,
+              renderedFrameCount,
+              sampledFrameCount,
+              sampledNonBlackFrameCount,
+              canvasWidth: canvas.width,
+              canvasHeight: canvas.height,
+            });
           }
-        } catch (error) {
-          logExportError('Canvas non-black sampling failed', error, {
-            renderedFrameCount,
-            sampledFrameCount,
-            sampledNonBlackFrameCount,
-            canvasWidth: canvas.width,
-            canvasHeight: canvas.height,
-          });
         }
-      }
-
-      if (renderedFrameCount === 1 || renderedFrameCount % 30 === 0) {
-        logExportInfo('Export frame rendered', {
-          renderedFrameCount,
-          sampledFrameCount,
-          sampledNonBlackFrameCount,
-          currentTime: video.currentTime,
-          canvasWidth: canvas.width,
-          canvasHeight: canvas.height,
-          videoWidth: video.videoWidth,
-          videoHeight: video.videoHeight,
-          recorderMimeType: mediaRecorder.mimeType,
-        });
       }
 
       setExportProgress(t / (video.duration * 1000));
@@ -1272,6 +1576,46 @@ export function useVideoExport(
         ctx.restore();
       }
 
+
+      if (shouldSampleFrame) {
+        try {
+          if (exportMode === 'overlayOnly' && isSampleNonBlack(ctx, width, height)) {
+            sampledNonBlackFrameCount += 1;
+          }
+          if (isSampleVisible(ctx, width, height)) {
+            sampledVisibleFrameCount += 1;
+          }
+        } catch (error) {
+          logExportError('Overlay/visibility pixel sampling failed', error, {
+            exportMode,
+            renderedFrameCount,
+            sampledFrameCount,
+            sampledNonBlackFrameCount,
+            sampledVisibleFrameCount,
+            canvasWidth: canvas.width,
+            canvasHeight: canvas.height,
+          });
+        }
+      }
+
+      if (renderedFrameCount === 1 || renderedFrameCount % 30 === 0) {
+        logExportInfo('Export frame rendered', {
+          exportMode,
+          renderedFrameCount,
+          sampledFrameCount,
+          sampledNonBlackFrameCount,
+          sampledVisibleFrameCount,
+          drawImageErrorCount,
+          currentTime: video.currentTime,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          recorderMimeType: mediaRecorder.mimeType,
+          realRecorderChunkCount: chunks.length,
+        });
+      }
+
       if (exportMode === 'composite') {
         if ((video as any).requestVideoFrameCallback) {
             (video as any).requestVideoFrameCallback(drawFrame);
@@ -1341,12 +1685,23 @@ export function useVideoExport(
     try {
       recordingStartTime = performance.now();
       recordingStopTime = 0;
-      mediaRecorder.start(1000);
+      mediaRecorder.start(250);
+      requestRecorderData(mediaRecorder, 'real export start', { exportMode });
+      window.setTimeout(() => requestRecorderData(mediaRecorder, 'real export 1s', {
+        exportMode,
+        realRecorderChunkCount: chunks.length,
+        realRecorderBlobSize: chunks.reduce((sum, chunk) => sum + chunk.size, 0),
+      }), 1000);
       logExportInfo('MediaRecorder started', {
         requestedMimeType: mimeInfo.mimeType,
         recorderMimeType: mediaRecorder.mimeType,
         extension: getExtensionForMimeType(mediaRecorder.mimeType || mimeInfo.mimeType),
-        timesliceMs: 1000,
+        timesliceMs: 250,
+        selectedMimeType: mimeInfo.mimeType || '(browser default)',
+        testedMimeTypes: recorderSupport?.testedMimeTypes || getSupportedMimeTypes().map(({ mimeType }) => mimeType),
+        testRecorderChunkCount: recorderSupport?.testRecorderChunkCount ?? 'not_run',
+        testRecorderBlobSize: recorderSupport?.testRecorderBlobSize ?? 'not_run',
+        isCanvasRecorderSupportedOnThisDevice: recorderSupport?.isCanvasRecorderSupportedOnThisDevice ?? 'not_tested',
         canvasWidth: canvas.width,
         canvasHeight: canvas.height,
         videoWidth: video.videoWidth,
