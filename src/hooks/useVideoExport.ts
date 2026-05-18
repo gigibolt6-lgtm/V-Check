@@ -1,17 +1,40 @@
 import { Directory, Filesystem } from '@capacitor/filesystem';
 import { Capacitor } from '@capacitor/core';
+import { Media } from '@capacitor-community/media';
 import { useState, RefObject } from 'react';
 import { VideoData } from '../types';
 
-const CAPACITOR_SAVE_DIRECTORIES = [Directory.Documents, Directory.ExternalStorage];
-
-const VIDEO_MIME_TYPES = [
-  'video/webm;codecs=vp8',
-  'video/webm',
-  'video/webm;codecs=vp9',
-  'video/webm;codecs=h264',
-  'video/mp4',
+const CAPACITOR_SAVE_DIRECTORIES = [
+  Directory.Documents,
+  Directory.Data,
+  Directory.Cache,
+  Directory.ExternalStorage,
 ];
+
+const GALLERY_ALBUM_NAME = 'V-Check';
+
+const VIDEO_MIME_CANDIDATES = [
+  { mimeType: 'video/mp4;codecs=avc1.42E01E,mp4a.40.2', extension: 'mp4' },
+  { mimeType: 'video/mp4;codecs=h264,aac', extension: 'mp4' },
+  { mimeType: 'video/mp4', extension: 'mp4' },
+  { mimeType: 'video/webm;codecs=vp9,opus', extension: 'webm' },
+  { mimeType: 'video/webm;codecs=vp8,opus', extension: 'webm' },
+  { mimeType: 'video/webm;codecs=h264', extension: 'webm' },
+  { mimeType: 'video/webm', extension: 'webm' },
+] as const;
+
+type ExportMimeInfo = {
+  mimeType: string;
+  extension: 'mp4' | 'webm';
+};
+
+type SaveAttempt = {
+  method: string;
+  directory?: Directory;
+  success: boolean;
+  uri?: string;
+  error?: string;
+};
 
 const formatExportTimestamp = () => {
   const now = new Date();
@@ -20,12 +43,81 @@ const formatExportTimestamp = () => {
   return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 };
 
-const selectVideoMimeType = () => {
-  if (typeof MediaRecorder === 'undefined' || typeof MediaRecorder.isTypeSupported !== 'function') {
-    return '';
+const getErrorMessage = (error: unknown) => {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+};
+
+const logExportInfo = (message: string, details?: Record<string, unknown>) => {
+  if (details) {
+    console.info(`[VideoExport] ${message}`, details);
+  } else {
+    console.info(`[VideoExport] ${message}`);
+  }
+};
+
+const logExportError = (message: string, error: unknown, details?: Record<string, unknown>) => {
+  console.error(`[VideoExport] ${message}`, {
+    ...details,
+    errorMessage: getErrorMessage(error),
+    error,
+  });
+};
+
+const getExtensionForMimeType = (mimeType: string): 'mp4' | 'webm' => (
+  mimeType.toLowerCase().includes('mp4') ? 'mp4' : 'webm'
+);
+
+const getSupportedMimeTypes = () => {
+  if (typeof MediaRecorder === 'undefined') return [];
+  if (typeof MediaRecorder.isTypeSupported !== 'function') return [...VIDEO_MIME_CANDIDATES];
+
+  return VIDEO_MIME_CANDIDATES.filter(({ mimeType }) => MediaRecorder.isTypeSupported(mimeType));
+};
+
+const createMediaRecorder = (stream: MediaStream) => {
+  if (typeof MediaRecorder === 'undefined') {
+    throw new Error('この環境では MediaRecorder が利用できないため、動画を書き出せません。');
   }
 
-  return VIDEO_MIME_TYPES.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) || '';
+  const supportedMimeTypes = getSupportedMimeTypes();
+  const candidates = supportedMimeTypes.length > 0 ? supportedMimeTypes : [{ mimeType: '', extension: 'webm' as const }];
+  let lastError: unknown;
+
+  for (const candidate of candidates) {
+    try {
+      const recorder = candidate.mimeType
+        ? new MediaRecorder(stream, { mimeType: candidate.mimeType })
+        : new MediaRecorder(stream);
+      const actualMimeType = recorder.mimeType || candidate.mimeType || 'video/webm';
+
+      logExportInfo('MediaRecorder selected', {
+        requestedMimeType: candidate.mimeType || '(browser default)',
+        actualMimeType,
+        extension: getExtensionForMimeType(actualMimeType),
+        supportedMimeTypes: supportedMimeTypes.map(({ mimeType }) => mimeType),
+      });
+
+      return {
+        recorder,
+        mimeInfo: {
+          mimeType: actualMimeType,
+          extension: getExtensionForMimeType(actualMimeType),
+        } satisfies ExportMimeInfo,
+      };
+    } catch (error) {
+      lastError = error;
+      logExportError('MediaRecorder candidate failed', error, { requestedMimeType: candidate.mimeType });
+    }
+  }
+
+  throw lastError || new Error('この端末で利用できる動画 MIME type が見つかりませんでした。');
 };
 
 const blobToBase64 = (blob: Blob) =>
@@ -44,31 +136,7 @@ const blobToBase64 = (blob: Blob) =>
     reader.readAsDataURL(blob);
   });
 
-const saveVideoBlob = async (blob: Blob, extension: string) => {
-  const fileName = `exported-video-${formatExportTimestamp()}.${extension}`;
-
-  if (Capacitor.isNativePlatform()) {
-    const data = await blobToBase64(blob);
-    let lastError: unknown;
-
-    for (const directory of CAPACITOR_SAVE_DIRECTORIES) {
-      try {
-        const result = await Filesystem.writeFile({
-          path: fileName,
-          data,
-          directory,
-        });
-
-        alert(`動画を保存しました: ${fileName}`);
-        return result.uri;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-
-    throw lastError || new Error('動画の保存に失敗しました。');
-  }
-
+const downloadBlobInBrowser = (blob: Blob, fileName: string, messagePrefix = '動画のダウンロードを開始しました') => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.style.display = 'none';
@@ -80,9 +148,167 @@ const saveVideoBlob = async (blob: Blob, extension: string) => {
     document.body.removeChild(a);
     window.URL.revokeObjectURL(url);
   }, 100);
-  alert(`動画のダウンロードを開始しました: ${fileName}`);
+  alert(`${messagePrefix}: ${fileName}`);
 
   return url;
+};
+
+const ensureGalleryAlbumIdentifier = async () => {
+  const platform = Capacitor.getPlatform();
+
+  const findAlbum = async () => {
+    const { albums } = await Media.getAlbums();
+
+    if (platform !== 'android') {
+      return albums.find(album => album.name === GALLERY_ALBUM_NAME)?.identifier;
+    }
+
+    try {
+      const albumsPath = (await Media.getAlbumsPath()).path;
+      return albums.find(album => album.name === GALLERY_ALBUM_NAME && album.identifier.startsWith(albumsPath))?.identifier
+        || albums.find(album => album.name === GALLERY_ALBUM_NAME)?.identifier;
+    } catch (error) {
+      logExportError('Media.getAlbumsPath failed; falling back to album name lookup', error);
+      return albums.find(album => album.name === GALLERY_ALBUM_NAME)?.identifier;
+    }
+  };
+
+  let albumIdentifier = await findAlbum();
+  if (!albumIdentifier) {
+    await Media.createAlbum({ name: GALLERY_ALBUM_NAME });
+    albumIdentifier = await findAlbum();
+  }
+
+  if (platform === 'android' && !albumIdentifier) {
+    throw new Error('Android のギャラリー保存に必要なアルバム ID を取得できませんでした。');
+  }
+
+  return albumIdentifier;
+};
+
+const saveToGallery = async (base64Data: string, fileNameBase: string, mimeInfo: ExportMimeInfo) => {
+  const albumIdentifier = await ensureGalleryAlbumIdentifier();
+  const dataUri = `data:${mimeInfo.mimeType};base64,${base64Data}`;
+
+  logExportInfo('Attempting gallery save via @capacitor-community/media', {
+    albumName: GALLERY_ALBUM_NAME,
+    albumIdentifier,
+    mimeType: mimeInfo.mimeType,
+    fileNameBase,
+  });
+
+  const result = await Media.saveVideo({
+    path: dataUri,
+    albumIdentifier,
+    fileName: fileNameBase,
+  });
+
+  logExportInfo('Gallery save succeeded', { result });
+  return result.filePath || result.identifier || `${GALLERY_ALBUM_NAME}/${fileNameBase}.${mimeInfo.extension}`;
+};
+
+const saveToCapacitorFilesystem = async (base64Data: string, fileName: string, mimeInfo: ExportMimeInfo, attempts: SaveAttempt[]) => {
+  let lastError: unknown;
+
+  for (const directory of CAPACITOR_SAVE_DIRECTORIES) {
+    try {
+      logExportInfo('Attempting Filesystem.writeFile', {
+        selectedDirectory: directory,
+        fileName,
+        mimeType: mimeInfo.mimeType,
+        base64Length: base64Data.length,
+      });
+
+      const result = await Filesystem.writeFile({
+        path: fileName,
+        data: base64Data,
+        directory,
+        recursive: true,
+      });
+
+      attempts.push({ method: 'Filesystem.writeFile', directory, success: true, uri: result.uri });
+      logExportInfo('Filesystem.writeFile succeeded', { selectedDirectory: directory, uri: result.uri });
+      return { uri: result.uri, directory };
+    } catch (error) {
+      lastError = error;
+      attempts.push({ method: 'Filesystem.writeFile', directory, success: false, error: getErrorMessage(error) });
+      logExportError('Filesystem.writeFile failed', error, {
+        selectedDirectory: directory,
+        fileName,
+        mimeType: mimeInfo.mimeType,
+      });
+    }
+  }
+
+  throw lastError || new Error('Filesystem.writeFile がすべての保存先で失敗しました。');
+};
+
+const saveVideoBlob = async (blob: Blob, mimeInfo: ExportMimeInfo) => {
+  const fileNameBase = `exported-video-${formatExportTimestamp()}`;
+  const fileName = `${fileNameBase}.${mimeInfo.extension}`;
+  const isNative = Capacitor.isNativePlatform();
+  const attempts: SaveAttempt[] = [];
+
+  logExportInfo('Saving exported video', {
+    fileName,
+    mimeType: mimeInfo.mimeType,
+    blobType: blob.type,
+    blobSize: blob.size,
+    isNative,
+    platform: Capacitor.getPlatform(),
+  });
+
+  if (!blob.size) {
+    throw new Error('書き出された動画データが空です。MediaRecorder または canvas.captureStream がこの端末で正常に動作していない可能性があります。');
+  }
+
+  if (!isNative) {
+    return downloadBlobInBrowser(blob, fileName);
+  }
+
+  let base64Data = '';
+  try {
+    base64Data = await blobToBase64(blob);
+    logExportInfo('Blob converted to base64', {
+      fileName,
+      blobSize: blob.size,
+      base64Length: base64Data.length,
+      mimeType: mimeInfo.mimeType,
+    });
+  } catch (error) {
+    logExportError('Blob to base64 conversion failed', error, { fileName, blobSize: blob.size, mimeType: mimeInfo.mimeType });
+    throw new Error(`動画データの変換に失敗しました。動画が大きすぎる可能性があります。詳細: ${getErrorMessage(error)}`);
+  }
+
+  try {
+    const galleryUri = await saveToGallery(base64Data, fileNameBase, mimeInfo);
+    attempts.push({ method: '@capacitor-community/media.saveVideo', success: true, uri: galleryUri });
+    alert(`動画をアルバム「${GALLERY_ALBUM_NAME}」に保存しました: ${fileName}`);
+    return galleryUri;
+  } catch (error) {
+    attempts.push({ method: '@capacitor-community/media.saveVideo', success: false, error: getErrorMessage(error) });
+    logExportError('Gallery save failed; falling back to Filesystem.writeFile', error, {
+      fileName,
+      mimeType: mimeInfo.mimeType,
+      blobSize: blob.size,
+    });
+  }
+
+  try {
+    const { uri, directory } = await saveToCapacitorFilesystem(base64Data, fileName, mimeInfo, attempts);
+    alert(`アルバム保存に失敗したため、${directory} に保存しました: ${fileName}\nURI: ${uri}`);
+    return uri;
+  } catch (filesystemError) {
+    logExportError('All native save methods failed; attempting browser download fallback', filesystemError, {
+      fileName,
+      mimeType: mimeInfo.mimeType,
+      blobSize: blob.size,
+      attempts,
+    });
+
+    downloadBlobInBrowser(blob, fileName, 'ネイティブ保存に失敗したため、ブラウザダウンロードを試行しました');
+    throw new Error(`動画の保存に失敗しました。mimeType=${mimeInfo.mimeType}, size=${blob.size} bytes, attempts=${JSON.stringify(attempts)}`);
+  }
 };
 
 export function useVideoExport(
@@ -118,31 +344,71 @@ export function useVideoExport(
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
-        setIsExporting(false);
-        return;
+      setIsExporting(false);
+      alert('動画を書き出せませんでした: Canvas を初期化できません。');
+      return;
     }
 
-    const canvasStream = canvas.captureStream(30); 
+    if (typeof canvas.captureStream !== 'function') {
+      setIsExporting(false);
+      alert('動画を書き出せませんでした: この端末では canvas.captureStream がサポートされていません。');
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      return;
+    }
+
+    const canvasStream = canvas.captureStream(30);
+    logExportInfo('Canvas capture stream created', {
+      width,
+      height,
+      videoWidth: video.videoWidth,
+      videoHeight: video.videoHeight,
+      exportMode,
+      isNative: Capacitor.isNativePlatform(),
+      platform: Capacitor.getPlatform(),
+    });
     
     let audioTracks: MediaStreamTrack[] = [];
     try {
-      const videoStream = (video as any).captureStream ? (video as any).captureStream() : (video as any).mozCaptureStream ? (video as any).mozCaptureStream() : null;
-      if (videoStream) {
-        audioTracks = videoStream.getAudioTracks();
+      const captureVideoStream = (video as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream }).captureStream
+        ? (video as HTMLVideoElement & { captureStream: () => MediaStream }).captureStream()
+        : (video as HTMLVideoElement & { mozCaptureStream?: () => MediaStream }).mozCaptureStream?.();
+      if (captureVideoStream) {
+        audioTracks = captureVideoStream.getAudioTracks();
       }
-    } catch(e) {}
+    } catch (error) {
+      logExportError('Could not capture audio tracks from source video; continuing without audio', error);
+    }
 
     audioTracks.forEach(track => canvasStream.addTrack(track));
+    logExportInfo('Audio tracks attached to export stream', { audioTrackCount: audioTracks.length });
 
-    const mimeType = selectVideoMimeType();
-    const options = mimeType ? { mimeType } : undefined;
-    const ext = mimeType.includes('mp4') ? 'mp4' : 'webm';
+    let mediaRecorder: MediaRecorder;
+    let mimeInfo: ExportMimeInfo;
+    try {
+      const recorderConfig = createMediaRecorder(canvasStream);
+      mediaRecorder = recorderConfig.recorder;
+      mimeInfo = recorderConfig.mimeInfo;
+    } catch (error) {
+      logExportError('Failed to create MediaRecorder', error, {
+        supportedMimeTypes: getSupportedMimeTypes().map(({ mimeType }) => mimeType),
+      });
+      setIsExporting(false);
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      alert(`動画を書き出せませんでした: ${getErrorMessage(error)}`);
+      return;
+    }
 
-    const mediaRecorder = new MediaRecorder(canvasStream, options);
     const chunks: Blob[] = [];
 
     mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunks.push(e.data);
+      if (e.data && e.data.size > 0) {
+        chunks.push(e.data);
+        logExportInfo('MediaRecorder data chunk received', {
+          chunkSize: e.data.size,
+          chunkType: e.data.type,
+          chunkCount: chunks.length,
+        });
+      }
     };
 
     mediaRecorder.onstop = async () => {
@@ -151,19 +417,39 @@ export function useVideoExport(
       }
 
       try {
-        const blob = new Blob(chunks, { type: mimeType || 'video/webm' });
-        await saveVideoBlob(blob, ext);
+        const recorderMimeType = mediaRecorder.mimeType || mimeInfo.mimeType || 'video/webm';
+        const finalMimeInfo = {
+          mimeType: recorderMimeType,
+          extension: getExtensionForMimeType(recorderMimeType),
+        } satisfies ExportMimeInfo;
+        const blob = new Blob(chunks, { type: recorderMimeType });
+
+        logExportInfo('MediaRecorder stopped', {
+          chunkCount: chunks.length,
+          mimeType: finalMimeInfo.mimeType,
+          extension: finalMimeInfo.extension,
+          blobSize: blob.size,
+        });
+
+        await saveVideoBlob(blob, finalMimeInfo);
       } catch (error) {
-        console.error('Failed to save exported video', error);
-        alert('動画の保存に失敗しました。もう一度お試しください。');
+        logExportError('Failed to save exported video', error, {
+          chunkCount: chunks.length,
+          recorderMimeType: mediaRecorder.mimeType,
+        });
+        alert(`動画の保存に失敗しました。
+原因: ${getErrorMessage(error)}`);
       } finally {
         setIsExporting(false);
       }
     };
 
     mediaRecorder.onerror = (event) => {
-      console.error('MediaRecorder failed during export', event);
-      alert('動画の書き出し中にエラーが発生しました。');
+      logExportError('MediaRecorder failed during export', event, {
+        mimeType: mediaRecorder.mimeType,
+        state: mediaRecorder.state,
+      });
+      alert(`動画の書き出し中にエラーが発生しました。mimeType=${mediaRecorder.mimeType || 'unknown'}`);
       setIsExporting(false);
     };
 
@@ -172,8 +458,26 @@ export function useVideoExport(
     video.currentTime = 0;
     video.playbackRate = 1.0;
     
-    await video.play();
-    mediaRecorder.start();
+    try {
+      await video.play();
+    } catch (error) {
+      logExportError('Source video playback failed before export recording', error, { exportMode });
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      setIsExporting(false);
+      alert(`動画の再生を開始できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`);
+      return;
+    }
+
+    try {
+      mediaRecorder.start(1000);
+      logExportInfo('MediaRecorder started', { mimeType: mediaRecorder.mimeType, timesliceMs: 1000 });
+    } catch (error) {
+      logExportError('MediaRecorder.start failed', error, { mimeType: mediaRecorder.mimeType });
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      setIsExporting(false);
+      alert(`動画の録画ストリームを開始できませんでした。原因: ${getErrorMessage(error)}`);
+      return;
+    }
 
     const formatTime = (timeMs: number) => {
       if (timeMs < 0) timeMs = 0;
