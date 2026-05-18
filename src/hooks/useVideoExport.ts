@@ -13,15 +13,24 @@ const CAPACITOR_SAVE_DIRECTORIES = [
 
 const GALLERY_ALBUM_NAME = 'V-Check';
 
-const VIDEO_MIME_CANDIDATES = [
+const MP4_MIME_CANDIDATES = [
   { mimeType: 'video/mp4;codecs=avc1.42E01E,mp4a.40.2', extension: 'mp4' },
   { mimeType: 'video/mp4;codecs=h264,aac', extension: 'mp4' },
   { mimeType: 'video/mp4', extension: 'mp4' },
-  { mimeType: 'video/webm;codecs=vp9,opus', extension: 'webm' },
-  { mimeType: 'video/webm;codecs=vp8,opus', extension: 'webm' },
-  { mimeType: 'video/webm;codecs=h264', extension: 'webm' },
-  { mimeType: 'video/webm', extension: 'webm' },
 ] as const;
+
+const WEBM_MIME_CANDIDATES = [
+  { mimeType: 'video/webm;codecs=vp8,opus', extension: 'webm' },
+  { mimeType: 'video/webm', extension: 'webm' },
+  { mimeType: 'video/webm;codecs=vp9,opus', extension: 'webm' },
+  { mimeType: 'video/webm;codecs=h264', extension: 'webm' },
+] as const;
+
+const getVideoMimeCandidates = () => (
+  Capacitor.getPlatform() === 'android'
+    ? [...WEBM_MIME_CANDIDATES, ...MP4_MIME_CANDIDATES]
+    : [...MP4_MIME_CANDIDATES, ...WEBM_MIME_CANDIDATES]
+);
 
 type ExportMimeInfo = {
   mimeType: string;
@@ -75,10 +84,11 @@ const getExtensionForMimeType = (mimeType: string): 'mp4' | 'webm' => (
 );
 
 const getSupportedMimeTypes = () => {
+  const candidates = getVideoMimeCandidates();
   if (typeof MediaRecorder === 'undefined') return [];
-  if (typeof MediaRecorder.isTypeSupported !== 'function') return [...VIDEO_MIME_CANDIDATES];
+  if (typeof MediaRecorder.isTypeSupported !== 'function') return candidates;
 
-  return VIDEO_MIME_CANDIDATES.filter(({ mimeType }) => MediaRecorder.isTypeSupported(mimeType));
+  return candidates.filter(({ mimeType }) => MediaRecorder.isTypeSupported(mimeType));
 };
 
 const createMediaRecorder = (stream: MediaStream) => {
@@ -102,6 +112,8 @@ const createMediaRecorder = (stream: MediaStream) => {
         actualMimeType,
         extension: getExtensionForMimeType(actualMimeType),
         supportedMimeTypes: supportedMimeTypes.map(({ mimeType }) => mimeType),
+        platform: Capacitor.getPlatform(),
+        isNative: Capacitor.isNativePlatform(),
       });
 
       return {
@@ -119,6 +131,140 @@ const createMediaRecorder = (stream: MediaStream) => {
 
   throw lastError || new Error('この端末で利用できる動画 MIME type が見つかりませんでした。');
 };
+
+
+const waitForAnimationFrame = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+const waitForVideoFrame = (video: HTMLVideoElement, timeoutMs = 1000) => new Promise<void>((resolve) => {
+  const requestVideoFrameCallback = (video as HTMLVideoElement & {
+    requestVideoFrameCallback?: (callback: () => void) => number;
+  }).requestVideoFrameCallback;
+  let settled = false;
+  const timeoutId = window.setTimeout(() => {
+    if (settled) return;
+    settled = true;
+    resolve();
+  }, timeoutMs);
+  const finish = () => {
+    if (settled) return;
+    settled = true;
+    window.clearTimeout(timeoutId);
+    resolve();
+  };
+
+  if (requestVideoFrameCallback) {
+    requestVideoFrameCallback.call(video, finish);
+    return;
+  }
+
+  requestAnimationFrame(finish);
+});
+
+const waitForVideoReady = (video: HTMLVideoElement, timeoutMs = 10000) => new Promise<void>((resolve, reject) => {
+  const hasUsableMetadata = () => (
+    video.readyState >= HTMLMediaElement.HAVE_METADATA
+    && video.videoWidth > 0
+    && video.videoHeight > 0
+    && Number.isFinite(video.duration)
+    && video.duration > 0
+  );
+
+  if (hasUsableMetadata()) {
+    resolve();
+    return;
+  }
+
+  let timeoutId: number | undefined;
+  const cleanup = () => {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    video.removeEventListener('loadedmetadata', onReady);
+    video.removeEventListener('loadeddata', onReady);
+    video.removeEventListener('canplay', onReady);
+    video.removeEventListener('error', onError);
+  };
+  const onReady = () => {
+    if (!hasUsableMetadata()) return;
+    cleanup();
+    resolve();
+  };
+  const onError = () => {
+    cleanup();
+    reject(new Error('動画メタデータを読み込めませんでした。'));
+  };
+
+  timeoutId = window.setTimeout(() => {
+    cleanup();
+    reject(new Error(`動画メタデータの読み込みがタイムアウトしました。readyState=${video.readyState}, video=${video.videoWidth}x${video.videoHeight}, duration=${video.duration}`));
+  }, timeoutMs);
+
+  video.addEventListener('loadedmetadata', onReady);
+  video.addEventListener('loadeddata', onReady);
+  video.addEventListener('canplay', onReady);
+  video.addEventListener('error', onError);
+  video.load();
+});
+
+const waitForSeek = async (video: HTMLVideoElement, timeSec: number, timeoutMs = 10000) => {
+  await waitForVideoReady(video);
+  const targetTime = Math.max(0, Math.min(timeSec, Number.isFinite(video.duration) ? video.duration : timeSec));
+
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let timeoutId: number | undefined;
+    const cleanup = () => {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('error', onError);
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const onSeeked = () => finish();
+    const onError = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('動画のシークに失敗しました。'));
+    };
+
+    timeoutId = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(`動画のシークがタイムアウトしました。target=${targetTime}, currentTime=${video.currentTime}, readyState=${video.readyState}`));
+    }, timeoutMs);
+
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.addEventListener('error', onError, { once: true });
+
+    if (Math.abs(video.currentTime - targetTime) < 0.01 && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+      finish();
+      return;
+    }
+
+    video.currentTime = targetTime;
+  });
+
+  await waitForVideoFrame(video);
+  await waitForAnimationFrame();
+};
+
+const assertExportFrameDimensions = (canvas: HTMLCanvasElement, video: HTMLVideoElement) => {
+  if (canvas.width <= 0 || canvas.height <= 0) {
+    throw new Error(`canvasサイズが不正です。canvas=${canvas.width}x${canvas.height}`);
+  }
+
+  if (video.videoWidth <= 0 || video.videoHeight <= 0) {
+    throw new Error(`動画サイズを取得できません。video=${video.videoWidth}x${video.videoHeight}, readyState=${video.readyState}`);
+  }
+};
+
+const formatExportDiagnostics = (details: Record<string, unknown>) => Object.entries(details)
+  .map(([key, value]) => `${key}=${String(value)}`)
+  .join(', ');
 
 const blobToBase64 = (blob: Blob) =>
   new Promise<string>((resolve, reject) => {
@@ -329,6 +475,27 @@ export function useVideoExport(
     setIsExporting(true);
     setExportProgress(0);
 
+    try {
+      await waitForVideoReady(video);
+      logExportInfo('Source video ready for export', {
+        readyState: video.readyState,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        duration: video.duration,
+        exportMode,
+      });
+    } catch (error) {
+      logExportError('Source video was not ready for export', error, {
+        readyState: video.readyState,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        duration: video.duration,
+      });
+      setIsExporting(false);
+      alert(`動画を書き出せませんでした: ${getErrorMessage(error)}`);
+      return;
+    }
+
     const canvas = document.createElement('canvas');
     canvas.style.position = 'fixed';
     canvas.style.top = '0';
@@ -338,21 +505,42 @@ export function useVideoExport(
     canvas.style.zIndex = '-9999';
     document.body.appendChild(canvas);
 
+    const cleanupCanvas = () => {
+      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+    };
+
     const width = video.videoWidth;
     const height = video.videoHeight;
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) {
+      cleanupCanvas();
       setIsExporting(false);
       alert('動画を書き出せませんでした: Canvas を初期化できません。');
+      return;
+    }
+
+    try {
+      assertExportFrameDimensions(canvas, video);
+    } catch (error) {
+      logExportError('Invalid export dimensions', error, {
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        readyState: video.readyState,
+      });
+      cleanupCanvas();
+      setIsExporting(false);
+      alert(`動画を書き出せませんでした: ${getErrorMessage(error)}`);
       return;
     }
 
     if (typeof canvas.captureStream !== 'function') {
       setIsExporting(false);
       alert('動画を書き出せませんでした: この端末では canvas.captureStream がサポートされていません。');
-      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      cleanupCanvas();
       return;
     }
 
@@ -360,6 +548,8 @@ export function useVideoExport(
     logExportInfo('Canvas capture stream created', {
       width,
       height,
+      canvasWidth: canvas.width,
+      canvasHeight: canvas.height,
       videoWidth: video.videoWidth,
       videoHeight: video.videoHeight,
       exportMode,
@@ -393,12 +583,13 @@ export function useVideoExport(
         supportedMimeTypes: getSupportedMimeTypes().map(({ mimeType }) => mimeType),
       });
       setIsExporting(false);
-      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
+      cleanupCanvas();
       alert(`動画を書き出せませんでした: ${getErrorMessage(error)}`);
       return;
     }
 
     const chunks: Blob[] = [];
+    let exportAbortMessage = '';
 
     mediaRecorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) {
@@ -412,9 +603,7 @@ export function useVideoExport(
     };
 
     mediaRecorder.onstop = async () => {
-      if (canvas.parentNode) {
-        canvas.parentNode.removeChild(canvas);
-      }
+      cleanupCanvas();
 
       try {
         const recorderMimeType = mediaRecorder.mimeType || mimeInfo.mimeType || 'video/webm';
@@ -423,19 +612,41 @@ export function useVideoExport(
           extension: getExtensionForMimeType(recorderMimeType),
         } satisfies ExportMimeInfo;
         const blob = new Blob(chunks, { type: recorderMimeType });
-
-        logExportInfo('MediaRecorder stopped', {
-          chunkCount: chunks.length,
-          mimeType: finalMimeInfo.mimeType,
+        const diagnostics = {
+          recorderMimeType,
+          finalMimeType: finalMimeInfo.mimeType,
           extension: finalMimeInfo.extension,
+          chunkCount: chunks.length,
           blobSize: blob.size,
-        });
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          readyState: video.readyState,
+          platform: Capacitor.getPlatform(),
+          isNative: Capacitor.isNativePlatform(),
+        };
+
+        logExportInfo('MediaRecorder stopped', diagnostics);
+
+        if (exportAbortMessage) {
+          throw new Error(`${exportAbortMessage} ${formatExportDiagnostics(diagnostics)}`);
+        }
+
+        if (chunks.length === 0 || blob.size === 0 || canvas.width <= 0 || canvas.height <= 0 || video.videoWidth <= 0 || video.videoHeight <= 0) {
+          throw new Error(`書き出しデータが不正です。${formatExportDiagnostics(diagnostics)}`);
+        }
 
         await saveVideoBlob(blob, finalMimeInfo);
       } catch (error) {
         logExportError('Failed to save exported video', error, {
           chunkCount: chunks.length,
           recorderMimeType: mediaRecorder.mimeType,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          readyState: video.readyState,
         });
         alert(`動画の保存に失敗しました。
 原因: ${getErrorMessage(error)}`);
@@ -455,29 +666,7 @@ export function useVideoExport(
 
     const originalTime = video.currentTime;
     const originalPlaybackRate = video.playbackRate;
-    video.currentTime = 0;
     video.playbackRate = 1.0;
-    
-    try {
-      await video.play();
-    } catch (error) {
-      logExportError('Source video playback failed before export recording', error, { exportMode });
-      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
-      setIsExporting(false);
-      alert(`動画の再生を開始できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`);
-      return;
-    }
-
-    try {
-      mediaRecorder.start(1000);
-      logExportInfo('MediaRecorder started', { mimeType: mediaRecorder.mimeType, timesliceMs: 1000 });
-    } catch (error) {
-      logExportError('MediaRecorder.start failed', error, { mimeType: mediaRecorder.mimeType });
-      if (canvas.parentNode) canvas.parentNode.removeChild(canvas);
-      setIsExporting(false);
-      alert(`動画の録画ストリームを開始できませんでした。原因: ${getErrorMessage(error)}`);
-      return;
-    }
 
     const formatTime = (timeMs: number) => {
       if (timeMs < 0) timeMs = 0;
@@ -501,6 +690,7 @@ export function useVideoExport(
 
     let isStopped = false;
     let overlayStartTime = performance.now();
+    let renderedFrameCount = 0;
 
     const drawFrame = (now?: number, metadata?: any) => {
       if (isStopped) return;
@@ -525,9 +715,38 @@ export function useVideoExport(
         }
       }
 
+      try {
+        assertExportFrameDimensions(canvas, video);
+      } catch (error) {
+        isStopped = true;
+        logExportError('Export frame dimensions became invalid during recording', error, {
+          recorderMimeType: mediaRecorder.mimeType,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          readyState: video.readyState,
+        });
+        exportAbortMessage = '録画中にcanvasまたは動画サイズが不正になったため、書き出しを中止しました。';
+        if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+        return;
+      }
+
       ctx.clearRect(0, 0, width, height);
       if (exportMode === 'composite') {
         ctx.drawImage(video, 0, 0, width, height);
+      }
+      renderedFrameCount += 1;
+      if (renderedFrameCount === 1 || renderedFrameCount % 30 === 0) {
+        logExportInfo('Export frame rendered', {
+          renderedFrameCount,
+          currentTime: video.currentTime,
+          canvasWidth: canvas.width,
+          canvasHeight: canvas.height,
+          videoWidth: video.videoWidth,
+          videoHeight: video.videoHeight,
+          recorderMimeType: mediaRecorder.mimeType,
+        });
       }
 
       setExportProgress(t / (video.duration * 1000));
@@ -768,6 +987,81 @@ export function useVideoExport(
         requestAnimationFrame(() => drawFrame());
       }
     };
+
+    const drawFirstFrameBeforeRecording = async () => {
+      await waitForSeek(video, 0);
+      assertExportFrameDimensions(canvas, video);
+      ctx.clearRect(0, 0, width, height);
+      if (exportMode === 'composite') {
+        ctx.drawImage(video, 0, 0, width, height);
+      }
+      await waitForAnimationFrame();
+      logExportInfo('First canvas frame drawn before MediaRecorder.start', {
+        exportMode,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        currentTime: video.currentTime,
+        readyState: video.readyState,
+      });
+    };
+
+    try {
+      await drawFirstFrameBeforeRecording();
+    } catch (error) {
+      logExportError('Failed to draw first frame before recording', error, {
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        readyState: video.readyState,
+      });
+      cleanupCanvas();
+      setIsExporting(false);
+      alert(`動画の最初のフレームを描画できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`);
+      return;
+    }
+
+    try {
+      mediaRecorder.start(1000);
+      logExportInfo('MediaRecorder started', {
+        requestedMimeType: mimeInfo.mimeType,
+        recorderMimeType: mediaRecorder.mimeType,
+        extension: getExtensionForMimeType(mediaRecorder.mimeType || mimeInfo.mimeType),
+        timesliceMs: 1000,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+      });
+    } catch (error) {
+      logExportError('MediaRecorder.start failed', error, {
+        mimeType: mediaRecorder.mimeType,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height,
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+      });
+      cleanupCanvas();
+      setIsExporting(false);
+      alert(`動画の録画ストリームを開始できませんでした。原因: ${getErrorMessage(error)}`);
+      return;
+    }
+
+    if (exportMode === 'composite') {
+      try {
+        await video.play();
+      } catch (error) {
+        logExportError('Source video playback failed after recording started', error, { exportMode, recorderMimeType: mediaRecorder.mimeType });
+        exportAbortMessage = `動画の再生を開始できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`;
+        if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+        video.playbackRate = originalPlaybackRate;
+        setIsExporting(false);
+        alert(`動画の再生を開始できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`);
+        return;
+      }
+    }
 
     if (exportMode === 'composite') {
       if ((video as any).requestVideoFrameCallback) {
