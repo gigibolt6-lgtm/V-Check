@@ -1003,24 +1003,53 @@ export default function EditorView({
               </div>
             </div>
             
-            <div className="flex items-center gap-2 sm:gap-4 shrink-0">
+            <div className="flex flex-1 min-w-0 items-center justify-end gap-2 sm:gap-4">
               {isExporting && (
-                <div className="px-2 sm:px-4 py-1.5 sm:py-2 bg-orange-500/20 text-orange-500 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-widest flex items-center gap-1 sm:gap-2 pointer-events-auto">
+                <div className="px-2 sm:px-4 py-1.5 sm:py-2 bg-orange-500/20 text-orange-500 rounded-full text-[9px] sm:text-[10px] font-black uppercase tracking-widest flex items-center gap-1 sm:gap-2 pointer-events-auto shrink-0">
                   <Loader2 className="w-3 h-3 animate-spin" />
                   <span className="hidden sm:inline">Generating: </span>{Math.round(exportProgress * 100)}%
                 </div>
               )}
-              <button 
-                onClick={(e) => {
-                  e.stopPropagation();
-                  addCheckpointAtCurrentTime();
-                }}
-                className="px-4 py-2 sm:px-6 sm:py-3 bg-orange-500 text-black hover:bg-orange-400 rounded-full text-[10px] sm:text-[11px] font-black uppercase tracking-widest transition-all pointer-events-auto flex items-center gap-1 sm:gap-2 active:scale-95 shadow-[0_0_20px_rgba(249,115,22,0.3)]"
+              <div
+                className="flex min-w-0 items-center gap-1.5 sm:gap-2 rounded-full border border-white/10 bg-black/45 px-2 py-1.5 sm:px-3 sm:py-2 shadow-[0_0_20px_rgba(0,0,0,0.25)] backdrop-blur-md"
+                onPointerDown={stopZoomControlPropagation}
+                onTouchStart={stopZoomControlPropagation}
+                aria-label="シークバー縮尺 / Timeline Scale"
               >
-                <Plus className="w-4 h-4 text-black shrink-0" />
-                <span className="hidden sm:inline">Add Marker</span>
-                <span className="sm:hidden">Add Marker</span>
-              </button>
+                <button
+                  type="button"
+                  onClick={() => adjustZoomLevel(-0.5)}
+                  className="flex h-7 w-7 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-full bg-white/5 text-sm font-black text-white transition-colors hover:bg-white/10 active:bg-white/20 disabled:opacity-30"
+                  disabled={zoomLevel <= 1}
+                  aria-label="シークバーを縮小"
+                >
+                  −
+                </button>
+                <input
+                  type="range"
+                  min="1"
+                  max="20"
+                  step="0.5"
+                  value={zoomLevel}
+                  onChange={(e) => updateZoomLevel(Number(e.currentTarget.value))}
+                  onPointerDown={stopZoomControlPropagation}
+                  onTouchStart={stopZoomControlPropagation}
+                  className="w-16 min-w-0 accent-orange-500 sm:w-28 md:w-40"
+                  aria-label="シークバー縮尺"
+                />
+                <button
+                  type="button"
+                  onClick={() => adjustZoomLevel(0.5)}
+                  className="flex h-7 w-7 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-full bg-white/5 text-sm font-black text-white transition-colors hover:bg-white/10 active:bg-white/20 disabled:opacity-30"
+                  disabled={zoomLevel >= 20}
+                  aria-label="シークバーを拡大"
+                >
+                  ＋
+                </button>
+                <span className="w-9 shrink-0 text-right font-mono text-[10px] font-black tabular-nums text-orange-500 sm:w-10 sm:text-xs">
+                  {zoomLevel.toFixed(1)}x
+                </span>
+              </div>
             </div>
           </div>
         </div>
@@ -1087,66 +1116,6 @@ export default function EditorView({
                 </button>
               </div>
 
-              <div
-                className="rounded-2xl border border-white/5 bg-black/20 p-4 space-y-3"
-                onPointerDown={stopZoomControlPropagation}
-                onTouchStart={stopZoomControlPropagation}
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="text-[10px] font-black uppercase tracking-[0.2em] text-white/30">シークバー縮尺</div>
-                    <div className="text-[9px] font-bold uppercase tracking-widest text-white/20 mt-1">Timeline Scale</div>
-                  </div>
-                  <div className="text-sm font-black font-mono text-orange-500 tabular-nums">{zoomLevel.toFixed(1)}x</div>
-                </div>
-
-                <input
-                  type="range"
-                  min="1"
-                  max="20"
-                  step="0.5"
-                  value={zoomLevel}
-                  onChange={(e) => updateZoomLevel(Number(e.currentTarget.value))}
-                  onPointerDown={stopZoomControlPropagation}
-                  onTouchStart={stopZoomControlPropagation}
-                  className="w-full accent-orange-500"
-                  aria-label="シークバー縮尺"
-                />
-
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => adjustZoomLevel(-0.5)}
-                    onPointerDown={stopZoomControlPropagation}
-                    onTouchStart={stopZoomControlPropagation}
-                    className="rounded-xl border border-white/5 bg-white/5 py-2 text-xs font-black text-white hover:bg-white/10 active:bg-white/20 disabled:opacity-30"
-                    disabled={zoomLevel <= 1}
-                    aria-label="シークバーを縮小"
-                  >
-                    −
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => updateZoomLevel(1)}
-                    onPointerDown={stopZoomControlPropagation}
-                    onTouchStart={stopZoomControlPropagation}
-                    className="rounded-xl border border-white/5 bg-white/5 py-2 text-[10px] font-black uppercase tracking-widest text-white hover:bg-white/10 active:bg-white/20"
-                  >
-                    リセット
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => adjustZoomLevel(0.5)}
-                    onPointerDown={stopZoomControlPropagation}
-                    onTouchStart={stopZoomControlPropagation}
-                    className="rounded-xl border border-white/5 bg-white/5 py-2 text-xs font-black text-white hover:bg-white/10 active:bg-white/20 disabled:opacity-30"
-                    disabled={zoomLevel >= 20}
-                    aria-label="シークバーを拡大"
-                  >
-                    ＋
-                  </button>
-                </div>
-              </div>
 
               {[...videoData.checkpoints].sort((a, b) => a.time - b.time).map((cp, idx, arr) => (
                 <Fragment key={cp.id}>

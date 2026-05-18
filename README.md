@@ -46,3 +46,15 @@ npm run android:debug
 ```
 
 APK は `android/app/build/outputs/apk/debug/` に出力されます。
+
+### Android 権限の付与
+
+APK ビルド時は `npm run cap:sync` の後半で `scripts/ensure-android-permissions.mjs` が実行され、生成済みの `android/app/src/main/AndroidManifest.xml` に録画と保存に必要な権限を追加します。
+
+追加される主な権限は `CAMERA`、`RECORD_AUDIO`、Android 13 以降向けの `READ_MEDIA_VIDEO` / `READ_MEDIA_IMAGES`、古い Android 向けの `READ_EXTERNAL_STORAGE` / `WRITE_EXTERNAL_STORAGE` です。
+
+### 動画保存方式
+
+動画書き出しは、Web ではブラウザのダウンロードとして保存します。Capacitor ネイティブ実行時は、まず `@capacitor-community/media` で Android/iOS のメディアライブラリ内に `V-Check` アルバムを作成して保存し、失敗した場合は `@capacitor/filesystem` で Documents / Data / Cache / ExternalStorage の順にフォールバック保存します。
+
+保存失敗時は、MIME type、Blob サイズ、保存先ディレクトリ、Capacitor 実行環境、各保存 API のエラー内容を `[VideoExport]` ログとして出力します。

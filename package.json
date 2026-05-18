@@ -9,14 +9,16 @@
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
-    "cap:sync": "npx cap sync android",
+    "cap:sync": "npx cap sync android && node scripts/ensure-android-permissions.mjs",
     "android:add": "test -d android || npx cap add android",
-    "android:debug": "npm run build && npm run android:add && npm run cap:sync && cd android && ./gradlew assembleDebug"
+    "android:debug": "npm run build && npm run android:add && npm run cap:sync && cd android && ./gradlew assembleDebug",
+    "android:permissions": "node scripts/ensure-android-permissions.mjs"
   },
   "dependencies": {
+    "@capacitor-community/media": "^9.1.0",
     "@capacitor/android": "^8.3.2",
-　　"@capacitor/core": "^8.3.2",
-　　"@capacitor/filesystem": "^8.1.2",
+    "@capacitor/core": "^8.3.2",
+    "@capacitor/filesystem": "^8.1.2",
     "@google/genai": "^1.29.0",
     "@tailwindcss/vite": "^4.1.14",
     "@types/jszip": "^3.4.0",

@@ -1,13 +1,35 @@
-import { useState, useRef, useEffect } from 'react';
-import { Camera, StopCircle, Pin, RefreshCcw, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { Pin, RefreshCcw, AlertCircle, CheckCircle2, ShieldCheck, Images } from 'lucide-react';
 import { formatTime, cn } from '../lib/utils';
 import { Checkpoint } from '../types';
 import { useTranslation } from '../i18n';
+import { Capacitor } from '@capacitor/core';
+import { Filesystem } from '@capacitor/filesystem';
 
 interface CameraViewProps {
   onVideoReady: (url: string, duration: number, checkpoints: Checkpoint[]) => void;
   stateNameHistory: string[];
 }
+
+type CameraStatus = 'idle' | 'initializing' | 'ready' | 'error' | 'denied';
+type PermissionUiStatus = 'unknown' | 'checking' | 'prompt' | 'granted' | 'denied' | 'error' | 'web';
+
+const isPermissionDeniedError = (error: unknown) => {
+  const err = error as { name?: string; message?: string };
+  return err.name === 'NotAllowedError'
+    || err.name === 'PermissionDeniedError'
+    || Boolean(err.message?.toLowerCase().includes('denied'));
+};
+
+const normalizeFilesystemPermission = (permissionStatus: unknown): PermissionUiStatus => {
+  const publicStorage = (permissionStatus as { publicStorage?: string }).publicStorage;
+
+  if (publicStorage === 'granted' || publicStorage === 'limited') return 'granted';
+  if (publicStorage === 'denied') return 'denied';
+  if (publicStorage === 'prompt' || publicStorage === 'prompt-with-rationale') return 'prompt';
+
+  return 'unknown';
+};
 
 export default function CameraView({ onVideoReady, stateNameHistory }: CameraViewProps) {
   const { t } = useTranslation();
@@ -21,98 +43,166 @@ export default function CameraView({ onVideoReady, stateNameHistory }: CameraVie
     checkpointsRef.current = checkpoints;
   }, [checkpoints]);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('environment');
-  const [retryCount, setRetryCount] = useState(0);
-  const [status, setStatus] = useState<'initializing' | 'ready' | 'error' | 'denied'>('initializing');
+  const [status, setStatus] = useState<CameraStatus>('idle');
+  const [cameraPermissionStatus, setCameraPermissionStatus] = useState<PermissionUiStatus>('unknown');
+  const [storagePermissionStatus, setStoragePermissionStatus] = useState<PermissionUiStatus>('unknown');
+  const [permissionMessage, setPermissionMessage] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   
   const videoRef = useRef<HTMLVideoElement>(null);
+  const activeStreamRef = useRef<MediaStream | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
 
-  useEffect(() => {
-    let mounted = true;
-    let initTimeout: number;
+  const stopActiveStream = useCallback(() => {
+    activeStreamRef.current?.getTracks().forEach(track => track.stop());
+    activeStreamRef.current = null;
 
-    const initCamera = async () => {
-      setStatus('initializing');
-      setErrorMsg('');
-      try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          throw new Error(t.camUnsupported);
-        }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  }, []);
 
-        // Simplify constraints for maximum compatibility
-        const constraints = {
-          video: { 
-            facingMode: facingMode,
-            width: { ideal: 1280 },
-            height: { ideal: 720 }
-          },
-          audio: true
-        };
-        
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
-        
-        if (!mounted) {
-          // If unmounted while waiting for user permission, stop constraints
-          stream.getTracks().forEach(track => track.stop());
+  const attachCameraStream = useCallback((stream: MediaStream) => {
+    stopActiveStream();
+    activeStreamRef.current = stream;
+
+    if (videoRef.current) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stopActiveStream]);
+
+  const requestCameraAccess = useCallback(async () => {
+    setStatus('initializing');
+    setCameraPermissionStatus('checking');
+    setPermissionMessage('');
+    setErrorMsg('');
+
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error(t.camUnsupported);
+      }
+
+      const constraints = {
+        video: {
+          facingMode: facingMode,
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
+        audio: true
+      };
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      attachCameraStream(stream);
+      setStatus('ready');
+      setCameraPermissionStatus('granted');
+      setPermissionMessage(t.permissionCameraGranted);
+    } catch (err: any) {
+      console.error("Camera access error:", err);
+
+      if (isPermissionDeniedError(err)) {
+        setStatus('denied');
+        setCameraPermissionStatus('denied');
+        setErrorMsg(t.camDenied);
+        setPermissionMessage(t.permissionCameraDenied);
+        return;
+      }
+
+      if (err.name === 'OverconstrainedError') {
+        try {
+          const simpleStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+          attachCameraStream(simpleStream);
+          setStatus('ready');
+          setCameraPermissionStatus('granted');
+          setPermissionMessage(t.permissionCameraGranted);
+          return;
+        } catch (retryErr: any) {
+          console.error("Camera fallback access error:", retryErr);
+          setStatus(isPermissionDeniedError(retryErr) ? 'denied' : 'error');
+          setCameraPermissionStatus(isPermissionDeniedError(retryErr) ? 'denied' : 'error');
+          setErrorMsg(isPermissionDeniedError(retryErr) ? t.camDenied : t.camNotFound);
+          setPermissionMessage(isPermissionDeniedError(retryErr) ? t.permissionCameraDenied : t.permissionCameraError);
           return;
         }
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-        setStatus('ready');
-      } catch (err: any) {
-        if (!mounted) return;
-        console.error("Camera access error:", err);
-        if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError' || err.message?.includes('denied')) {
-          setStatus('denied');
-          setErrorMsg(t.camDenied);
-        } else if (err.name === 'OverconstrainedError') {
-          // Fallback for strict resolution requirements
-          try {
-            const simpleStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-            if (!mounted) {
-              simpleStream.getTracks().forEach(track => track.stop());
-              return;
-            }
-            if (videoRef.current) {
-              videoRef.current.srcObject = simpleStream;
-              setStatus('ready');
-            }
-          } catch (retryErr: any) {
-            if (!mounted) return;
-            setStatus('error');
-            setErrorMsg(t.camNotFound);
-          }
-        } else {
-          setStatus('error');
-          setErrorMsg(err.message || t.camError);
-        }
       }
-    };
 
-    // Delay avoids double-prompting in React 18 Strict Mode
-    initTimeout = window.setTimeout(() => {
-      if (mounted) initCamera();
-    }, 200);
+      setStatus('error');
+      setCameraPermissionStatus('error');
+      setErrorMsg(err.message || t.camError);
+      setPermissionMessage(t.permissionCameraError);
+    }
+  }, [attachCameraStream, facingMode, t]);
 
+  const checkStoragePermission = useCallback(async () => {
+    if (!Capacitor.isNativePlatform()) {
+      setStoragePermissionStatus('web');
+      return;
+    }
+
+    setStoragePermissionStatus('checking');
+    try {
+      const permissionStatus = await Filesystem.checkPermissions();
+      setStoragePermissionStatus(normalizeFilesystemPermission(permissionStatus));
+    } catch (err) {
+      console.error('Storage permission check error:', err);
+      setStoragePermissionStatus('error');
+    }
+  }, []);
+
+  const requestStoragePermission = useCallback(async () => {
+    if (!Capacitor.isNativePlatform()) {
+      setStoragePermissionStatus('web');
+      setPermissionMessage(t.permissionStorageWeb);
+      return;
+    }
+
+    setStoragePermissionStatus('checking');
+    setPermissionMessage('');
+
+    try {
+      const permissionStatus = await Filesystem.requestPermissions();
+      const normalized = normalizeFilesystemPermission(permissionStatus);
+      setStoragePermissionStatus(normalized);
+      setPermissionMessage(normalized === 'granted' ? t.permissionStorageGranted : t.permissionStorageDenied);
+    } catch (err) {
+      console.error('Storage permission request error:', err);
+      setStoragePermissionStatus('error');
+      setPermissionMessage(t.permissionStorageError);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    checkStoragePermission();
+
+    if (navigator.permissions?.query) {
+      navigator.permissions.query({ name: 'camera' as PermissionName })
+        .then((permissionStatus) => {
+          setCameraPermissionStatus(permissionStatus.state === 'granted' ? 'granted' : permissionStatus.state === 'denied' ? 'denied' : 'prompt');
+
+          permissionStatus.onchange = () => {
+            setCameraPermissionStatus(permissionStatus.state === 'granted' ? 'granted' : permissionStatus.state === 'denied' ? 'denied' : 'prompt');
+          };
+        })
+        .catch(() => setCameraPermissionStatus('unknown'));
+    }
+  }, [checkStoragePermission]);
+
+  useEffect(() => {
+    if (status === 'ready') {
+      requestCameraAccess();
+    }
+  }, [facingMode]);
+
+  useEffect(() => {
     return () => {
-      mounted = false;
-      clearTimeout(initTimeout);
-      if (videoRef.current?.srcObject) {
-        const tracks = (videoRef.current.srcObject as MediaStream).getTracks();
-        tracks.forEach(track => track.stop());
-        videoRef.current.srcObject = null;
-      }
+      stopActiveStream();
       if (timerRef.current) window.clearInterval(timerRef.current);
     };
-  }, [facingMode, retryCount]);
+  }, [stopActiveStream]);
 
-  const handleRetry = () => setRetryCount(c => c + 1);
+  const handleRetry = () => requestCameraAccess();
 
   const getSupportedMimeType = () => {
     const types = [
@@ -186,10 +276,106 @@ export default function CameraView({ onVideoReady, stateNameHistory }: CameraVie
     setFacingMode(prev => prev === 'user' ? 'environment' : 'user');
   };
 
+  const getPermissionLabel = (permissionStatus: PermissionUiStatus) => {
+    switch (permissionStatus) {
+      case 'checking':
+        return t.permissionChecking;
+      case 'prompt':
+      case 'unknown':
+        return t.permissionNotGranted;
+      case 'granted':
+        return t.permissionGranted;
+      case 'denied':
+        return t.permissionDenied;
+      case 'web':
+        return t.permissionStorageWeb;
+      case 'error':
+      default:
+        return t.permissionError;
+    }
+  };
+
+  const getPermissionTone = (permissionStatus: PermissionUiStatus) => {
+    switch (permissionStatus) {
+      case 'granted':
+      case 'web':
+        return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+      case 'denied':
+      case 'error':
+        return 'border-rose-500/30 bg-rose-500/10 text-rose-300';
+      case 'checking':
+        return 'border-orange-500/30 bg-orange-500/10 text-orange-300';
+      default:
+        return 'border-white/10 bg-white/5 text-white/50';
+    }
+  };
+
+  const permissionCards = [
+    {
+      label: t.permissionCameraLabel,
+      status: cameraPermissionStatus,
+      buttonLabel: status === 'ready' ? t.permissionCameraRefresh : t.permissionCameraButton,
+      onClick: requestCameraAccess,
+      icon: ShieldCheck,
+      disabled: cameraPermissionStatus === 'checking' || status === 'initializing'
+    },
+    {
+      label: t.permissionStorageLabel,
+      status: storagePermissionStatus,
+      buttonLabel: Capacitor.isNativePlatform() ? t.permissionStorageButton : t.permissionStorageWebButton,
+      onClick: requestStoragePermission,
+      icon: Images,
+      disabled: storagePermissionStatus === 'checking' || storagePermissionStatus === 'web'
+    }
+  ];
+
   return (
     <div className="relative h-full bg-[#0A0A0B] overflow-hidden flex flex-col landscape:flex-row">
       {/* Camera Preview Area */}
       <div className="flex-1 relative bg-black flex items-center justify-center">
+        {!isRecording && (
+          <div className="absolute top-4 left-4 right-4 z-30 flex justify-center pointer-events-none">
+            <div className="w-full max-w-2xl rounded-3xl border border-white/10 bg-[#121214]/80 p-3 shadow-2xl backdrop-blur-xl pointer-events-auto sm:p-4">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-[10px] font-black uppercase tracking-[0.25em] text-orange-500/80">{t.permissionPanelTitle}</p>
+                  <p className="mt-1 text-xs text-white/45">{t.permissionPanelDesc}</p>
+                </div>
+                <CheckCircle2 className={cn("h-5 w-5 shrink-0", cameraPermissionStatus === 'granted' ? "text-emerald-400" : "text-white/15")} />
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-2">
+                {permissionCards.map(({ label, status: permissionStatus, buttonLabel, onClick, icon: Icon, disabled }) => (
+                  <div key={label} className="rounded-2xl border border-white/5 bg-black/25 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Icon className="h-4 w-4 shrink-0 text-orange-500" />
+                        <span className="truncate text-[10px] font-black uppercase tracking-widest text-white/70">{label}</span>
+                      </div>
+                      <span className={cn("shrink-0 rounded-full border px-2 py-1 text-[9px] font-black uppercase tracking-widest", getPermissionTone(permissionStatus))}>
+                        {getPermissionLabel(permissionStatus)}
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={onClick}
+                      disabled={disabled}
+                      className="w-full rounded-xl bg-orange-500 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-black transition-colors hover:bg-orange-400 active:scale-[0.99] disabled:cursor-not-allowed disabled:bg-white/10 disabled:text-white/25"
+                    >
+                      {buttonLabel}
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              {permissionMessage && (
+                <p className="mt-3 rounded-xl bg-white/5 px-3 py-2 text-xs text-white/60">{permissionMessage}</p>
+              )}
+            </div>
+          </div>
+        )}
+
         <video
           ref={videoRef}
           autoPlay
@@ -200,6 +386,13 @@ export default function CameraView({ onVideoReady, stateNameHistory }: CameraVie
         
         {status !== 'ready' && (
           <div className="flex flex-col items-center gap-4 p-8 text-center">
+            {status === 'idle' && (
+              <>
+                <ShieldCheck className="w-16 h-16 text-orange-500 opacity-60" />
+                <h3 className="text-lg font-bold uppercase tracking-tight">{t.permissionPanelTitle}</h3>
+                <p className="text-white/40 text-sm max-w-xs">{t.permissionPanelDesc}</p>
+              </>
+            )}
             {status === 'initializing' && (
               <div className="w-12 h-12 border-2 border-orange-500 border-t-transparent rounded-full animate-spin" />
             )}
