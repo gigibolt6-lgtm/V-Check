@@ -266,6 +266,41 @@ const formatExportDiagnostics = (details: Record<string, unknown>) => Object.ent
   .map(([key, value]) => `${key}=${String(value)}`)
   .join(', ');
 
+const MIN_VALID_EXPORT_BLOB_BYTES = 10 * 1024;
+const MIN_VALID_RECORDED_DURATION_MS = 500;
+
+const getTrackReadyStates = (stream: MediaStream) => stream.getVideoTracks().map(track => track.readyState);
+
+const getBlobVideoDurationMs = (blob: Blob, timeoutMs = 5000) => new Promise<number | null>((resolve) => {
+  const video = document.createElement('video');
+  const url = URL.createObjectURL(blob);
+  let timeoutId: number | undefined;
+
+  const cleanup = () => {
+    if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    video.onloadedmetadata = null;
+    video.onerror = null;
+    video.removeAttribute('src');
+    video.load();
+    URL.revokeObjectURL(url);
+  };
+
+  const finish = (durationMs: number | null) => {
+    cleanup();
+    resolve(durationMs);
+  };
+
+  timeoutId = window.setTimeout(() => finish(null), timeoutMs);
+  video.preload = 'metadata';
+  video.onloadedmetadata = () => {
+    const durationMs = video.duration * 1000;
+    finish(Number.isFinite(durationMs) && durationMs > 0 ? durationMs : null);
+  };
+  video.onerror = () => finish(null);
+  video.src = url;
+  video.load();
+});
+
 const blobToBase64 = (blob: Blob) =>
   new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -552,8 +587,10 @@ export function useVideoExport(
       canvasHeight: canvas.height,
       videoWidth: video.videoWidth,
       videoHeight: video.videoHeight,
+      videoReadyState: video.readyState,
+      canvasVideoTrackStates: getTrackReadyStates(canvasStream),
       exportMode,
-      isNative: Capacitor.isNativePlatform(),
+      isNativePlatform: Capacitor.isNativePlatform(),
       platform: Capacitor.getPlatform(),
     });
     
@@ -590,6 +627,41 @@ export function useVideoExport(
 
     const chunks: Blob[] = [];
     let exportAbortMessage = '';
+    let recordingStartTime = 0;
+    let recordingStopTime = 0;
+    let renderedFrameCount = 0;
+
+    const stopExportRecording = (reason: string) => {
+      if (mediaRecorder.state === 'inactive') return;
+
+      recordingStopTime = performance.now();
+      logExportInfo('Stopping MediaRecorder', {
+        reason,
+        mediaRecorderState: mediaRecorder.state,
+        recorderMimeType: mediaRecorder.mimeType,
+        renderedFrameCount,
+        chunksLength: chunks.length,
+        chunkSizes: chunks.map(chunk => chunk.size),
+        canvasVideoTrackStates: getTrackReadyStates(canvasStream),
+      });
+
+      if (mediaRecorder.state === 'recording') {
+        try {
+          mediaRecorder.requestData();
+          logExportInfo('MediaRecorder.requestData called before stop', {
+            mediaRecorderState: mediaRecorder.state,
+            recorderMimeType: mediaRecorder.mimeType,
+          });
+        } catch (error) {
+          logExportError('MediaRecorder.requestData before stop failed', error, {
+            mediaRecorderState: mediaRecorder.state,
+            recorderMimeType: mediaRecorder.mimeType,
+          });
+        }
+      }
+
+      mediaRecorder.stop();
+    };
 
     mediaRecorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) {
@@ -598,6 +670,9 @@ export function useVideoExport(
           chunkSize: e.data.size,
           chunkType: e.data.type,
           chunkCount: chunks.length,
+          chunkSizes: chunks.map(chunk => chunk.size),
+          mediaRecorderState: mediaRecorder.state,
+          renderedFrameCount,
         });
       }
     };
@@ -612,19 +687,31 @@ export function useVideoExport(
           extension: getExtensionForMimeType(recorderMimeType),
         } satisfies ExportMimeInfo;
         const blob = new Blob(chunks, { type: recorderMimeType });
+        const recordedDurationMs = recordingStartTime && recordingStopTime
+          ? recordingStopTime - recordingStartTime
+          : 0;
+        const blobDurationMs = blob.size > 0 ? await getBlobVideoDurationMs(blob) : null;
         const diagnostics = {
+          platform: Capacitor.getPlatform(),
+          isNativePlatform: Capacitor.isNativePlatform(),
           recorderMimeType,
           finalMimeType: finalMimeInfo.mimeType,
           extension: finalMimeInfo.extension,
-          chunkCount: chunks.length,
-          blobSize: blob.size,
+          mediaRecorderState: mediaRecorder.state,
           canvasWidth: canvas.width,
           canvasHeight: canvas.height,
           videoWidth: video.videoWidth,
           videoHeight: video.videoHeight,
-          readyState: video.readyState,
-          platform: Capacitor.getPlatform(),
-          isNative: Capacitor.isNativePlatform(),
+          videoReadyState: video.readyState,
+          canvasVideoTrackStates: getTrackReadyStates(canvasStream),
+          renderedFrameCount,
+          chunkCount: chunks.length,
+          chunkSizes: chunks.map(chunk => chunk.size),
+          blobSize: blob.size,
+          recordingStartTime,
+          recordingStopTime,
+          recordedDurationMs,
+          blobDurationMs: blobDurationMs ?? 'unknown',
         };
 
         logExportInfo('MediaRecorder stopped', diagnostics);
@@ -633,22 +720,40 @@ export function useVideoExport(
           throw new Error(`${exportAbortMessage} ${formatExportDiagnostics(diagnostics)}`);
         }
 
-        if (chunks.length === 0 || blob.size === 0 || canvas.width <= 0 || canvas.height <= 0 || video.videoWidth <= 0 || video.videoHeight <= 0) {
-          throw new Error(`書き出しデータが不正です。${formatExportDiagnostics(diagnostics)}`);
+        const isLikelyZeroSecondExport = recordedDurationMs < MIN_VALID_RECORDED_DURATION_MS || blobDurationMs === null || blobDurationMs < MIN_VALID_RECORDED_DURATION_MS;
+        if (
+          chunks.length === 0
+          || blob.size < MIN_VALID_EXPORT_BLOB_BYTES
+          || isLikelyZeroSecondExport
+          || canvas.width <= 0
+          || canvas.height <= 0
+          || video.videoWidth <= 0
+          || video.videoHeight <= 0
+        ) {
+          throw new Error(`この端末では動画合成出力に失敗しました。壊れた0秒動画を保存しません。${formatExportDiagnostics(diagnostics)}`);
         }
 
         await saveVideoBlob(blob, finalMimeInfo);
       } catch (error) {
         logExportError('Failed to save exported video', error, {
+          platform: Capacitor.getPlatform(),
+          isNativePlatform: Capacitor.isNativePlatform(),
           chunkCount: chunks.length,
+          chunkSizes: chunks.map(chunk => chunk.size),
           recorderMimeType: mediaRecorder.mimeType,
+          mediaRecorderState: mediaRecorder.state,
           canvasWidth: canvas.width,
           canvasHeight: canvas.height,
           videoWidth: video.videoWidth,
           videoHeight: video.videoHeight,
-          readyState: video.readyState,
+          videoReadyState: video.readyState,
+          canvasVideoTrackStates: getTrackReadyStates(canvasStream),
+          renderedFrameCount,
+          recordingStartTime,
+          recordingStopTime,
+          recordedDurationMs: recordingStartTime && recordingStopTime ? recordingStopTime - recordingStartTime : 0,
         });
-        alert(`動画の保存に失敗しました。
+        alert(`この端末では動画合成出力に失敗しました。0秒または壊れた動画は保存しません。
 原因: ${getErrorMessage(error)}`);
       } finally {
         setIsExporting(false);
@@ -690,7 +795,6 @@ export function useVideoExport(
 
     let isStopped = false;
     let overlayStartTime = performance.now();
-    let renderedFrameCount = 0;
 
     const drawFrame = (now?: number, metadata?: any) => {
       if (isStopped) return;
@@ -700,7 +804,7 @@ export function useVideoExport(
         t = (metadata ? metadata.mediaTime : video.currentTime) * 1000;
         if (video.ended || t >= video.duration * 1000 - 100) {
           isStopped = true;
-          mediaRecorder.stop();
+          stopExportRecording('composite reached video end');
           video.pause();
           video.currentTime = originalTime;
           video.playbackRate = originalPlaybackRate;
@@ -710,7 +814,7 @@ export function useVideoExport(
         t = performance.now() - overlayStartTime;
         if (t >= video.duration * 1000) {
           isStopped = true;
-          mediaRecorder.stop();
+          stopExportRecording('overlayOnly reached duration');
           return;
         }
       }
@@ -728,13 +832,31 @@ export function useVideoExport(
           readyState: video.readyState,
         });
         exportAbortMessage = '録画中にcanvasまたは動画サイズが不正になったため、書き出しを中止しました。';
-        if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+        stopExportRecording('export frame dimensions invalid');
         return;
       }
 
       ctx.clearRect(0, 0, width, height);
       if (exportMode === 'composite') {
-        ctx.drawImage(video, 0, 0, width, height);
+        try {
+          ctx.drawImage(video, 0, 0, width, height);
+        } catch (error) {
+          isStopped = true;
+          exportAbortMessage = `動画フレームをcanvasへ描画できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`;
+          logExportError('ctx.drawImage(video) failed during export', error, {
+            recorderMimeType: mediaRecorder.mimeType,
+            mediaRecorderState: mediaRecorder.state,
+            canvasWidth: canvas.width,
+            canvasHeight: canvas.height,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            videoReadyState: video.readyState,
+            canvasVideoTrackStates: getTrackReadyStates(canvasStream),
+            renderedFrameCount,
+          });
+          stopExportRecording('drawImage failed during export');
+          return;
+        }
       }
       renderedFrameCount += 1;
       if (renderedFrameCount === 1 || renderedFrameCount % 30 === 0) {
@@ -993,9 +1115,28 @@ export function useVideoExport(
       assertExportFrameDimensions(canvas, video);
       ctx.clearRect(0, 0, width, height);
       if (exportMode === 'composite') {
-        ctx.drawImage(video, 0, 0, width, height);
+        try {
+          ctx.drawImage(video, 0, 0, width, height);
+        } catch (error) {
+          logExportError('ctx.drawImage(video) failed before recording', error, {
+            canvasWidth: canvas.width,
+            canvasHeight: canvas.height,
+            videoWidth: video.videoWidth,
+            videoHeight: video.videoHeight,
+            videoReadyState: video.readyState,
+            canvasVideoTrackStates: getTrackReadyStates(canvasStream),
+          });
+          throw error;
+        }
       }
       await waitForAnimationFrame();
+      await waitForAnimationFrame();
+
+      const canvasVideoTrackStates = getTrackReadyStates(canvasStream);
+      if (canvasVideoTrackStates.length === 0 || canvasVideoTrackStates.some(state => state !== 'live')) {
+        throw new Error(`canvas.captureStream の video track が live ではありません。trackStates=${canvasVideoTrackStates.join('|') || 'none'}`);
+      }
+
       logExportInfo('First canvas frame drawn before MediaRecorder.start', {
         exportMode,
         canvasWidth: canvas.width,
@@ -1004,6 +1145,7 @@ export function useVideoExport(
         videoHeight: video.videoHeight,
         currentTime: video.currentTime,
         readyState: video.readyState,
+        canvasVideoTrackStates,
       });
     };
 
@@ -1024,6 +1166,8 @@ export function useVideoExport(
     }
 
     try {
+      recordingStartTime = performance.now();
+      recordingStopTime = 0;
       mediaRecorder.start(1000);
       logExportInfo('MediaRecorder started', {
         requestedMimeType: mimeInfo.mimeType,
@@ -1034,6 +1178,12 @@ export function useVideoExport(
         canvasHeight: canvas.height,
         videoWidth: video.videoWidth,
         videoHeight: video.videoHeight,
+        videoReadyState: video.readyState,
+        mediaRecorderState: mediaRecorder.state,
+        canvasVideoTrackStates: getTrackReadyStates(canvasStream),
+        recordingStartTime,
+        platform: Capacitor.getPlatform(),
+        isNativePlatform: Capacitor.isNativePlatform(),
       });
     } catch (error) {
       logExportError('MediaRecorder.start failed', error, {
@@ -1055,7 +1205,7 @@ export function useVideoExport(
       } catch (error) {
         logExportError('Source video playback failed after recording started', error, { exportMode, recorderMimeType: mediaRecorder.mimeType });
         exportAbortMessage = `動画の再生を開始できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`;
-        if (mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+        stopExportRecording('source video playback failed after recording started');
         video.playbackRate = originalPlaybackRate;
         setIsExporting(false);
         alert(`動画の再生を開始できず、書き出しを中止しました。原因: ${getErrorMessage(error)}`);
