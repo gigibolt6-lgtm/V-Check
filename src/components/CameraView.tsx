@@ -512,6 +512,8 @@ export default function CameraView({
     }
   };
 
+  const shouldShowPermissionPanel = !isRecording && showPermissionPanel;
+
   const permissionCards = [
     {
       label: t.permissionCameraLabel,
@@ -540,20 +542,20 @@ export default function CameraView({
   ];
 
   return (
-    <div className="relative h-full bg-[#0A0A0B] overflow-hidden flex flex-col landscape:flex-row">
+    <div className="relative isolate h-full bg-[#0A0A0B] overflow-hidden flex flex-col landscape:flex-row">
       {/* Camera Preview Area */}
-      <div className="flex-1 relative bg-black flex items-center justify-center">
+      <div className="relative isolate z-0 flex-1 overflow-hidden bg-black flex items-center justify-center">
         {!isRecording && (
           <button
             type="button"
             onClick={handleShowPermissionPanel}
-            className="absolute right-4 top-4 z-20 rounded-full border border-white/10 bg-[#121214]/70 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white/60 shadow-xl backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white"
+            className="absolute right-4 top-4 z-40 rounded-full border border-white/10 bg-[#121214]/70 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white/60 shadow-xl backdrop-blur-md transition-colors hover:bg-white/10 hover:text-white"
           >
             {t.permissionPanelTitle}
           </button>
         )}
 
-        {!isRecording && showPermissionPanel && (
+        {shouldShowPermissionPanel && (
           <div className="absolute top-16 left-4 right-4 z-30 flex justify-center pointer-events-none">
             <div className="w-full max-w-2xl rounded-3xl border border-white/10 bg-[#121214]/80 p-3 shadow-2xl backdrop-blur-xl pointer-events-auto sm:p-4">
               <div className="mb-3 flex items-center justify-between gap-3">
@@ -650,13 +652,13 @@ export default function CameraView({
           muted
           playsInline
           className={cn(
-            "w-full h-full object-cover",
+            "pointer-events-none absolute inset-0 z-0 w-full h-full object-cover",
             status !== "ready" && "hidden",
           )}
         />
 
         {status !== "ready" && (
-          <div className="flex flex-col items-center gap-4 p-8 text-center">
+          <div className="relative z-10 flex flex-col items-center gap-4 p-8 text-center">
             {status === "idle" && (
               <>
                 <ShieldCheck className="w-16 h-16 text-orange-500 opacity-60" />
@@ -720,7 +722,7 @@ export default function CameraView({
         {/* HUD Layer */}
         {status === "ready" && (
           <>
-            <div className="absolute top-6 left-6 flex flex-col gap-2">
+            <div className="absolute top-6 left-6 z-40 flex flex-col gap-2">
               {isRecording && (
                 <div className="flex items-center gap-3 px-4 py-2 bg-[#121214]/80 backdrop-blur-xl rounded-full border border-white/10 shadow-2xl">
                   <div className="w-2.5 h-2.5 bg-red-600 rounded-full animate-pulse" />
@@ -734,7 +736,7 @@ export default function CameraView({
               </div>
             </div>
 
-            <div className="absolute top-6 right-6 flex flex-col gap-2 items-end">
+            <div className="absolute top-6 right-6 z-40 flex flex-col gap-2 items-end">
               {checkpoints.slice(-3).map((cp, idx) => (
                 <div
                   key={cp.id}
@@ -751,7 +753,7 @@ export default function CameraView({
       </div>
 
       {/* Record Controls */}
-      <div className="h-32 sm:h-44 landscape:h-full landscape:w-32 landscape:sm:w-44 bg-[#121214] border-t landscape:border-t-0 landscape:border-l border-white/10 flex landscape:flex-col items-center justify-between px-4 sm:px-10 landscape:px-0 landscape:py-4 landscape:sm:py-10 relative shrink-0">
+      <div className="relative z-50 h-32 sm:h-44 landscape:h-full landscape:w-32 landscape:sm:w-44 bg-[#121214] border-t landscape:border-t-0 landscape:border-l border-white/10 flex landscape:flex-col items-center justify-between px-4 sm:px-10 landscape:px-0 landscape:py-4 landscape:sm:py-10 shrink-0 shadow-2xl">
         <button
           onClick={toggleCamera}
           className="w-10 h-10 sm:w-12 sm:h-12 flex items-center justify-center rounded-full bg-white/5 border border-white/10 text-white/40 hover:text-white transition-colors shrink-0"
